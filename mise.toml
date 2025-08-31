@@ -1,0 +1,3 @@
+[tasks]
+bot = "uv run python -m bot -c config.local.yaml"
+build = "docker buildx build --pull -t lax.vultrcr.com/mercury/korg:latest . --push"
