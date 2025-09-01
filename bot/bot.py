@@ -3,17 +3,15 @@ from logging import getLogger
 import re
 
 import asyncio
-from pprint import pformat
-import signal
 from typing import Optional
 import dspy
-from pydantic import AnyHttpUrl, ValidationError, WebsocketUrl
+from pydantic import ValidationError
 from websockets import ClientConnection, ConnectionClosed
 from websockets.asyncio.client import connect
 import httpx
 
 from .ai import ChatAgent
-from .models import Config, MiWebsocketMessage, Note, User
+from .models import Config, MiWebsocketMessage, Note
 
 logger = getLogger(__name__)
 

@@ -8,6 +8,7 @@ class User(BaseModel):
     name: Optional[str] = None
     username: str
     host: Optional[str] = None
+    location: Optional[str] = None
 
     # Allow additional fields with unknown types
     class Config:
