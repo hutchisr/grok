@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+.vscode
+
 config.local.yaml
 test.ipynb
 k8s.yaml
