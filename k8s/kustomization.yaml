@@ -1,0 +1,14 @@
+# kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- base.yaml
+configMapGenerator:
+- name: grok-config
+  namespace: misskey
+  files:
+  - config.yaml=config.yaml
+  - optimized.json=optimized.json
+  options:
+    labels:
+      app.kubernetes.io/name: grok

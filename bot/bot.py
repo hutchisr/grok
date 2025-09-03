@@ -43,8 +43,8 @@ class Bot:
             logger.info(
                 f"Received note: {note.id} {note.user.username}: {note.text.replace("\n", "⏎")[:100]}"
             )
-            if note.replyId:
-                context = await self.get_context(note.replyId)
+            if note.reply:
+                context = note.reply.text
             else:
                 context = None
             predict = await self._agent.reply(note=note, context=context)
@@ -62,7 +62,7 @@ class Bot:
                 for mention in prediction.mentions
                 if not re.match(
                     rf"^@?{self._config.bot_username}(@{self._config.domain})?$",
-                    mention,
+                    mention.strip(),
                 )
             }
             if prediction.mentions
@@ -77,7 +77,7 @@ class Bot:
 
         async with httpx.AsyncClient(transport=self._transport) as client:
             payload = {
-                "text": f"{' '.join(mentions)} {prediction.reply}",
+                "text": f"{' '.join(mentions)} {re.sub(r"^@[\w\-]+(:?@[\w\-]+\.\w+)?\s*", "", prediction.reply)}",
                 "visibility": "public",
             }
             if in_reply_to and in_reply_to.id:
@@ -149,7 +149,7 @@ class Bot:
                 msg = MiWebsocketMessage(**json.loads(message))
                 if msg.type == "channel" and msg.body and msg.body.type in {"mention"}:
                     (
-                        await self.on_mention(msg.body.body)
+                        asyncio.create_task(self.on_mention(msg.body.body))
                         if msg.body and msg.body.body
                         else None
                     )

@@ -13,4 +13,5 @@ wheels/
 
 config.local.yaml
 test.ipynb
-k8s.yaml
+/k8s/config.yaml
+/k8s/optimized.json

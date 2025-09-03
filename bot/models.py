@@ -71,6 +71,7 @@ class Config(BaseModel):
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
+    model_file: Optional[str] = None
     debug: Optional[bool] = None
 
     @field_validator('redis_uri')
