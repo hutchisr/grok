@@ -50,5 +50,4 @@ metadata:
   name: rachels-mac-mini
   namespace: misskey
 spec:
-  externalName: placeholder # any value - will be overwritten by operator
   type: ExternalName

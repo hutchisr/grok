@@ -12,9 +12,9 @@ import httpx
 
 from .ai import ChatAgent
 from .models import Config, MiWebsocketMessage, Note
+from .api import api_client
 
 logger = getLogger(__name__)
-
 
 class Bot:
     def __init__(
@@ -32,7 +32,6 @@ class Bot:
 
         self._config = config
         self._agent = ChatAgent(config)
-        self._transport = httpx.AsyncHTTPTransport(retries=config.max_retries)
         self._shutdown_event = asyncio.Event()
 
     async def on_mention(self, note: Note):
@@ -75,44 +74,35 @@ class Bot:
                 username += f"@{in_reply_to.user.host}"
             mentions.add(username)
 
-        async with httpx.AsyncClient(transport=self._transport) as client:
-            payload = {
-                "text": f"{' '.join(mentions)} {re.sub(r"^@[\w\-]+(:?@[\w\-]+\.\w+)?\s*", "", prediction.reply)}",
-                "visibility": "public",
-            }
-            if in_reply_to and in_reply_to.id:
-                payload["replyId"] = in_reply_to.id
+        payload = {
+            "text": f"{' '.join(mentions)} {re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply)}",
+            "visibility": "public",
+        }
+        if in_reply_to and in_reply_to.id:
+            payload["replyId"] = in_reply_to.id
 
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
 
-            response = await client.post(
-                f"{self.url}api/notes/create", json=payload, headers=headers
-            )
-            response.raise_for_status()
-            logger.info(f"Sent note: {response.json().get("createdNote").get("id")}")
+
+        response = await api_client.post(
+            f"{self.url}api/notes/create", json=payload
+        )
+        response.raise_for_status()
+        logger.info(f"Sent note: {response.json().get("createdNote").get("id")}")
 
     async def get_context(self, note_id: str) -> Optional[str]:
-        async with httpx.AsyncClient(transport=self._transport) as client:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            try:
-                response = await client.post(
-                    f"{self.url}api/notes/show",
-                    json={"noteId": note_id},
-                    headers=headers,
-                )
-                response.raise_for_status()
-                note = response.json()
-                logger.info(f"Fetched note context: {note.get("id")}")
-                return Note(**note).text
-            except httpx.HTTPError:
-                logger.exception("Error fetching note")
-            return None
+        try:
+
+            response = await api_client.post(
+                f"{self.url}api/notes/show",
+                json={"noteId": note_id},
+            )
+            response.raise_for_status()
+            note = response.json()
+            logger.info(f"Fetched note context: {note.get("id")}")
+            return Note(**note).text
+        except httpx.HTTPError:
+            logger.exception("Error fetching note")
+        return None
 
     async def run(self):
         logger.info("Connecting to WebSocket...")
@@ -147,6 +137,7 @@ class Bot:
         async for message in websocket:
             try:
                 msg = MiWebsocketMessage(**json.loads(message))
+                logger.debug(f"{msg}")
                 if msg.type == "channel" and msg.body and msg.body.type in {"mention"}:
                     (
                         asyncio.create_task(self.on_mention(msg.body.body))
