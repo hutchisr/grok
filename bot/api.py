@@ -17,19 +17,18 @@ class ApiClient:
 
     @property
     def __client(self) -> httpx.AsyncClient:
-        if self.__async_client is None:
-            with self.__lock:
-                if self.__async_client is None:  # Double-check locking
-                    if self.__config:
-                        self.__async_client = httpx.AsyncClient(
-                            transport=httpx.AsyncHTTPTransport(
-                                retries=self.__config.max_retries
-                            ),
-                            headers={"Authorization": f"Bearer {self.__config.token}"},
-                        )
-                    else:
-                        logger.warning("API client accessed before configuration")
-                        self.__async_client = httpx.AsyncClient()
+        with self.__lock:
+            if self.__async_client is None:
+                if self.__config:
+                    self.__async_client = httpx.AsyncClient(
+                        transport=httpx.AsyncHTTPTransport(
+                            retries=self.__config.max_retries
+                        ),
+                        headers={"Authorization": f"Bearer {self.__config.token}"},
+                    )
+                else:
+                    logger.warning("API client accessed before configuration")
+                    self.__async_client = httpx.AsyncClient()
         return self.__async_client
 
     def configure(self, config: Config) -> None:
@@ -71,7 +70,6 @@ class ApiClient:
 # Create the instance
 api_client = ApiClient()
 
-# For static-analysis
 if TYPE_CHECKING:
     class ApiAsyncClient(ApiClient, httpx.AsyncClient): ...
     api_client = cast(ApiAsyncClient, api_client)

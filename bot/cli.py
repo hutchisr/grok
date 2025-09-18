@@ -3,7 +3,6 @@ from logging import INFO, DEBUG, basicConfig, getLogger
 import signal
 
 import click
-import dspy
 import yaml
 
 from .bot import Bot
@@ -32,8 +31,6 @@ async def main_async(config):
 
     # Configure global HTTP client with config settings
     api_client.configure(config)
-
-    dspy.settings.configure(track_usage=True)
 
     bot = Bot(
         config=config

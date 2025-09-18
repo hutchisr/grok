@@ -16,6 +16,7 @@ from .api import api_client
 
 logger = getLogger(__name__)
 
+
 class Bot:
     def __init__(
         self,
@@ -38,16 +39,33 @@ class Bot:
         if note.user.id == self.user_id:
             logger.debug("Ignoring own mention")
             return
-        if note.text:
-            logger.info(
-                f"Received note: {note.id} {note.user.username}: {note.text.replace("\n", "⏎")[:100]}"
-            )
-            if note.reply:
-                context = note.reply.text
-            else:
-                context = None
-            predict = await self._agent.reply(note=note, context=context)
-            await self.send_note(predict, in_reply_to=note)
+        if not note.text:
+            logger.debug(f"Empty note? {note}")
+            return
+        logger.info(
+            f"Received note: {note.id} `{note.user.username}: {note.text.replace("\n", "⏎")[:100]}`"
+        )
+        context: Optional[list[Note]] = []
+        if note.replyId:
+            reply_id = note.replyId
+            for _ in range(self._config.max_context):
+                try:
+                    reply = await self.get_note(reply_id)
+                except httpx.HTTPError:
+                    logger.exception("Error fetching context")
+                    break
+                # Add to context if it has text OR files
+                if reply.text or reply.files:
+                    context.append(reply)
+                # fetch next note in thread
+                if reply.replyId:
+                    reply_id = reply.replyId
+                else:
+                    break
+        if note.renote and (note.renote.text or note.renote.files):
+            context.append(note.renote)
+        predict = await self._agent.reply(note=note, context=context)
+        await self.send_note(predict, in_reply_to=note)
 
     async def send_note(
         self,
@@ -75,34 +93,26 @@ class Bot:
             mentions.add(username)
 
         payload = {
-            "text": f"{' '.join(mentions)} {re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply)}",
+            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply)}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:
             payload["replyId"] = in_reply_to.id
 
-
-
-        response = await api_client.post(
-            f"{self.url}api/notes/create", json=payload
-        )
+        response = await api_client.post(f"{self.url}api/notes/create", json=payload)
         response.raise_for_status()
         logger.info(f"Sent note: {response.json().get("createdNote").get("id")}")
 
-    async def get_context(self, note_id: str) -> Optional[str]:
-        try:
-
-            response = await api_client.post(
-                f"{self.url}api/notes/show",
-                json={"noteId": note_id},
-            )
-            response.raise_for_status()
-            note = response.json()
-            logger.info(f"Fetched note context: {note.get("id")}")
-            return Note(**note).text
-        except httpx.HTTPError:
-            logger.exception("Error fetching note")
-        return None
+    async def get_note(self, note_id: str) -> Note:
+        response = await api_client.post(
+            f"{self.url}api/notes/show",
+            json={"noteId": note_id},
+        )
+        response.raise_for_status()
+        note = response.json()
+        note = Note(**note)
+        logger.info(f"Fetched note: {note.id} with {len(note.files) if note.files else "no"} file(s)")
+        return note
 
     async def run(self):
         logger.info("Connecting to WebSocket...")
@@ -139,11 +149,9 @@ class Bot:
                 msg = MiWebsocketMessage(**json.loads(message))
                 logger.debug(f"{msg}")
                 if msg.type == "channel" and msg.body and msg.body.type in {"mention"}:
-                    (
-                        asyncio.create_task(self.on_mention(msg.body.body))
-                        if msg.body and msg.body.body
-                        else None
-                    )
+                    if msg.body and msg.body.body:
+                        task = asyncio.create_task(self.on_mention(msg.body.body))
+                        task.add_done_callback(self._task_done_callback)
             except ValidationError as e:
                 logger.debug(
                     f"Validation error: {e}. Message doesn't match expected format, ignoring."
@@ -154,6 +162,16 @@ class Bot:
                 raise
             except Exception:
                 logger.exception("Error processing message")
+
+    def _task_done_callback(self, task: asyncio.Task):
+        """Handle completed tasks - log exceptions and discard."""
+        if task.cancelled():
+            return
+
+        try:
+            task.result()  # This will raise any exception that occurred
+        except Exception:
+            logger.exception("Task failed with exception")
 
     def shutdown(self):
         self._shutdown_event.set()

@@ -1,6 +1,5 @@
-from pydantic import BaseModel, Field, AnyHttpUrl, AnyUrl, WebsocketUrl, field_validator, model_validator
+from pydantic import BaseModel, Field, AnyHttpUrl, WebsocketUrl
 from typing import List, Optional, Literal
-import re
 
 
 class User(BaseModel):
@@ -14,6 +13,13 @@ class User(BaseModel):
     class Config:
         extra = "allow"
 
+class MiFile(BaseModel):
+    id: str
+    type: str
+    thumbnailUrl: Optional[str] = None
+    url: Optional[str] = None
+    class Config:
+        extra = "allow"
 
 class Note(BaseModel):
     id: str
@@ -26,6 +32,7 @@ class Note(BaseModel):
     renote: Optional['Note'] = None
     visibility: Literal["public", "home", "followers", "specified"]
     mentions: Optional[List[str]] = None
+    files: Optional[List[MiFile]]
 
     # Allow additional fields with unknown types
     class Config:
@@ -58,37 +65,16 @@ class Config(BaseModel):
     token: str = Field(description="token")
     channel: Optional[str] = None
     llm_endpoints: List[LlmEndpoint] = Field(description="llm_endpoints")
-    max_tokens: int = Field(gt=0, description="max_tokens must be greater than 0")
+    vision_endpoints: List[LlmEndpoint] = Field()
+    max_tokens: int = Field(gt=0)
     bot_user_id: str = Field(description="bot_user_id")
     bot_username: str = Field(description="bot_username")
     system_prompt: str = Field(description="system_prompt")
     system_prompt_auto: str = Field(description="system_prompt_auto")
-    redis_uri: Optional[AnyUrl] = None
-    redis_key_prefix: Optional[str] = Field(None, description="redis_key_prefix")
-    redis_key_ttl: Optional[int] = Field(None, gt=0, description="redis_key_ttl must be greater than 0")
-    max_retries: int = Field(gt=0, description="max_retries must be greater than 0")
-    max_memory: int = Field(ge=0, description="max_memory must not be negative")
+    max_retries: int = Field(gt=0)
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
     model_file: Optional[str] = None
+    max_context: int = Field(gt=0, default=1, description="Number of context messages to include")
     debug: Optional[bool] = None
-
-    @field_validator('redis_uri')
-    @classmethod
-    def validate_redis_uri(cls, v):
-        if v is None:
-            return v
-
-        # Redis URI pattern validation
-        redis_pattern = r'^(redis|rediss|redis-sentinel):\/\/(?:([^:/@\s]+)(?::([^@\s]*))?@)?([^:/@\s]+|\[[a-fA-F0-9:]+\])(?::(\d+))?(?:\/(\d+))?$'
-        if not re.match(redis_pattern, str(v)):
-            raise ValueError("redis_uri must be a valid Redis URI (redis:// or rediss://)")
-        return v
-
-    @model_validator(mode='after')
-    def validate_redis_config(self):
-        # Custom validation: if redis_uri is provided, redis_key_ttl must be positive
-        if self.redis_uri and self.redis_key_ttl is not None and self.redis_key_ttl <= 0:
-            raise ValueError("redis_key_ttl must be greater than 0 when redis_uri is provided")
-        return self
