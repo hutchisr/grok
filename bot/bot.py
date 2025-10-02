@@ -80,6 +80,7 @@ class Bot:
                 if not re.match(
                     rf"^@?{self._config.bot_username}(@{self._config.domain})?$",
                     mention.strip(),
+                    re.IGNORECASE
                 )
             }
             if prediction.mentions

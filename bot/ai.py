@@ -15,7 +15,7 @@ logger = getLogger(__name__)
 class Reply(dspy.Signature):
     message: str = dspy.InputField()
     descriptions: Optional[list[str]] = dspy.InputField(desc="descriptions of images included in message")
-    context: Optional[str] = dspy.InputField(desc="context referenced by message")
+    context: Optional[list[str]] = dspy.InputField(desc="context referenced by message")
     location: Optional[str] = dspy.InputField(desc="location of the user, if known")
     # history: Optional[dspy.History] = dspy.InputField()
     reply: str = dspy.OutputField(
@@ -80,7 +80,7 @@ class ChatAgent(dspy.Module):
                             message=note.text,
                             descriptions=descriptions,
                             location=note.user.location,
-                            context=[f"{c.text}\n\n---\n\n" for c in context if c.text] if context else None,
+                            context=[f"{c.user.name}: {c.text}" for c in context if c.text] if context else None,
                         )
 
                         logger.info(f"Reply: {output}")
