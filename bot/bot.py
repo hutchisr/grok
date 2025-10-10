@@ -64,7 +64,7 @@ class Bot:
                     break
         if note.renote and (note.renote.text or note.renote.files):
             context.append(note.renote)
-        predict = await self._agent.reply(note=note, context=context)
+        predict = await self._agent.acall(note=note, context=context)
         await self.send_note(predict, in_reply_to=note)
 
     async def send_note(

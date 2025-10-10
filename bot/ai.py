@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from pathlib import Path
 from typing import Optional
@@ -6,7 +7,7 @@ from typing import Optional
 import dspy
 
 from .models import Config, Note, MiFile
-from .tools import configure_web_search
+from .tools import configure_web_search, current_datetime
 
 
 logger = getLogger(__name__)
@@ -14,10 +15,12 @@ logger = getLogger(__name__)
 
 class Reply(dspy.Signature):
     message: str = dspy.InputField()
-    descriptions: Optional[list[str]] = dspy.InputField(desc="descriptions of images included in message")
-    context: Optional[list[str]] = dspy.InputField(desc="context referenced by message")
+    user: str = dspy.InputField(desc="Author of the message")
+    descriptions: Optional[list[str]] = dspy.InputField(
+        desc="descriptions of images included in message"
+    )
+    history: Optional[dspy.History] = dspy.InputField(desc="Conversation history")
     location: Optional[str] = dspy.InputField(desc="location of the user, if known")
-    # history: Optional[dspy.History] = dspy.InputField()
     reply: str = dspy.OutputField(
         desc="Reply to the message. Must NOT include mentions or usernames. Must not be None."
     )
@@ -37,19 +40,22 @@ class ChatAgent(dspy.Module):
         self._config = config
 
         search_tool = configure_web_search(config)
-        tools = [search_tool]
+        tools = [search_tool, current_datetime]
 
         self.generate_reply = dspy.ReAct(
             Reply.with_instructions(config.system_prompt), tools=tools
         )
-        self.image_describer = dspy.Predict(ImagesSig.with_instructions("Describe the images provided"))
-
+        self.image_describer = dspy.Predict(
+            ImagesSig.with_instructions("Describe the images provided")
+        )
 
         if config.model_file and Path(config.model_file).is_file():
             self.load(config.model_file)
             logger.info(f"Loaded model {config.model_file}")
 
-    async def reply(self, note: Note, context: Optional[list[Note]] = None) -> dspy.Prediction:
+    async def aforward(
+        self, note: Note, context: Optional[list[Note]] = None
+    ) -> dspy.Prediction:
         if not note.text:
             raise ValueError("Note text is empty")
         files: list[MiFile] = []
@@ -76,11 +82,21 @@ class ChatAgent(dspy.Module):
                     ),
                 ):
                     try:
-                        output = await self.acall(
+                        output = await self.generate_reply.acall(
                             message=note.text,
+                            user=note.user.name,
                             descriptions=descriptions,
                             location=note.user.location,
-                            context=[f"{c.user.name}: {c.text}" for c in context if c.text] if context else None,
+                            history=dspy.History(
+                                messages=(
+                                    [
+                                        {"message": c.text, "user": c.user.name}
+                                        for c in context
+                                    ]
+                                    if context
+                                    else []
+                                )
+                            ),
                         )
 
                         logger.info(f"Reply: {output}")
@@ -105,7 +121,9 @@ class ChatAgent(dspy.Module):
             logger.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
             if f.thumbnailUrl:
                 try:
-                    images.append(await asyncio.to_thread(dspy.Image.from_url, f.thumbnailUrl))
+                    images.append(
+                        await asyncio.to_thread(dspy.Image.from_url, f.thumbnailUrl)
+                    )
                 except Exception:
                     logger.exception("Failed to load image")
         for ep in self._config.vision_endpoints:
@@ -133,8 +151,15 @@ class ChatAgent(dspy.Module):
                         await asyncio.sleep(1)
                         break
 
-    async def aforward(self, *args, **kwargs):
-        return await self.generate_reply.acall(*args, **kwargs)
-
     def forward(self, *args, **kwargs):
-        return self.generate_reply(*args, **kwargs)
+        def run_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(self.aforward(*args, **kwargs))
+            finally:
+                loop.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_async)
+            return future.result()

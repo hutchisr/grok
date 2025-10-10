@@ -7,4 +7,6 @@ WORKDIR /app
 
 RUN uv sync
 
-CMD ["uv", "run", "python", "-m", "bot", "-c", "/config.yaml"]
+ENTRYPOINT ["uv", "run", "--no-sync"]
+
+CMD ["python", "-m", "bot", "-c", "/config.yaml"]

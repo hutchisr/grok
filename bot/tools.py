@@ -1,5 +1,6 @@
 from typing import Optional
-from colorlog import getLogger
+from datetime import datetime
+from logging import getLogger
 import httpx
 
 from .models import Config
@@ -9,6 +10,8 @@ logger = getLogger(__name__)
 
 def configure_web_search(config: Config):
     def search_web(query: str) -> Optional[str]:
+        """Search the web"""
+
         auth: Optional[httpx.BasicAuth] = None
         if config.searxng_user and config.searxng_password:
             auth = httpx.BasicAuth(config.searxng_user, config.searxng_password)
@@ -26,3 +29,8 @@ def configure_web_search(config: Config):
                 return None
 
     return search_web
+
+def current_datetime():
+    """Gets current date and time"""
+
+    return str(datetime.now())
