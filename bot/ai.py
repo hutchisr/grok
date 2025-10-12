@@ -39,8 +39,10 @@ class ChatAgent(dspy.Module):
         super().__init__()
         self._config = config
 
-        search_tool = configure_web_search(config)
-        tools = [search_tool, current_datetime]
+        tools = [current_datetime]
+
+        if config.searxng_url:
+            tools += [configure_web_search(config)]
 
         self.generate_reply = dspy.ReAct(
             Reply.with_instructions(config.system_prompt), tools=tools
@@ -141,7 +143,7 @@ class ChatAgent(dspy.Module):
                         logger.info(f"Image descriptions: {pred}")
                         return pred.descriptions
                     except TypeError as err:
-                        logger.info(f"dspy probably ate shit ({err}), retrying...")
+                        logger.info(f"dspy probably fucked up ({err}), retrying...")
                         await asyncio.sleep(0)
                         continue
                     except Exception:
