@@ -152,6 +152,7 @@ class ChatAgent(dspy.Module):
                         break
 
     def forward(self, *args, **kwargs):
+        """Some bullshit to get this to run sync for prompt optimization in ipython notebooks"""
         def run_async():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
