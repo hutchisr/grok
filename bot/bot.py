@@ -83,7 +83,7 @@ class Bot:
                     re.IGNORECASE
                 )
             }
-            if prediction.mentions
+            if prediction.mentions and isinstance(prediction.mentions, list)
             else set()
         )
 
@@ -94,7 +94,7 @@ class Bot:
             mentions.add(username)
 
         payload = {
-            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply)}",
+            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply or "")}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:

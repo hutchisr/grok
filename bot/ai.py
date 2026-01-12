@@ -25,7 +25,7 @@ class Reply(dspy.Signature):
         desc="Reply to the message. Must NOT include mentions or usernames. Must not be None."
     )
     mentions: Optional[list[str]] = dspy.OutputField(
-        desc="list of users mentioned in the message"
+        desc="list of usernames mentioned in the message"
     )
 
 
@@ -86,13 +86,13 @@ class ChatAgent(dspy.Module):
                     try:
                         output = await self.generate_reply.acall(
                             message=note.text,
-                            user=note.user.name,
+                            user=note.user.username,
                             descriptions=descriptions,
                             location=note.user.location,
                             history=dspy.History(
                                 messages=(
                                     [
-                                        {"message": c.text, "user": c.user.name}
+                                        {"message": c.text, "user": c.user.username}
                                         for c in context
                                     ]
                                     if context
@@ -137,6 +137,7 @@ class ChatAgent(dspy.Module):
                         api_base=str(ep.url),
                         temperature=1,
                     ),
+                    adapter=dspy.XMLAdapter(),  # XMLAdapter doesn't use JSON mode
                 ):
                     try:
                         pred = await self.image_describer.acall(images=images)
