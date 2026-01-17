@@ -14,3 +14,11 @@ configMapGenerator:
   options:
     labels:
       app.kubernetes.io/name: grok
+secretGenerator:
+- name: grok-secrets
+  namespace: misskey
+  envs:
+  - secrets.txt
+  options:
+    labels:
+      app.kubernetes.io/name: grok

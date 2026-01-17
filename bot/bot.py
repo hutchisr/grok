@@ -4,13 +4,12 @@ import re
 
 import asyncio
 from typing import Optional
-import dspy
 from pydantic import ValidationError
 from websockets import ClientConnection, ConnectionClosed
 from websockets.asyncio.client import connect
 import httpx
 
-from .ai import ChatAgent
+from .ai import ChatAgent, ReplyOutput
 from .models import Config, MiWebsocketMessage, Note
 from .api import api_client
 
@@ -64,26 +63,26 @@ class Bot:
                     break
         if note.renote and (note.renote.text or note.renote.files):
             context.append(note.renote)
-        predict = await self._agent.acall(note=note, context=context)
-        await self.send_note(predict, in_reply_to=note)
+        result = await self._agent.run(note=note, context=context)
+        await self.send_note(result, in_reply_to=note)
 
     async def send_note(
         self,
-        prediction: dspy.Prediction,
+        output: ReplyOutput,
         in_reply_to: Optional[Note] = None,
     ):
         # Filter out bot's own username from mentions
         mentions = (
             {
                 f"{mention if mention.startswith("@") else "@" + mention}"
-                for mention in prediction.mentions
+                for mention in output.mentions
                 if not re.match(
                     rf"^@?{self._config.bot_username}(@{self._config.domain})?$",
                     mention.strip(),
                     re.IGNORECASE
                 )
             }
-            if prediction.mentions and isinstance(prediction.mentions, list)
+            if output.mentions and isinstance(output.mentions, list)
             else set()
         )
 
@@ -94,7 +93,7 @@ class Bot:
             mentions.add(username)
 
         payload = {
-            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", prediction.reply or "")}",
+            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", output.reply or "")}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:

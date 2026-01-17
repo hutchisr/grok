@@ -23,6 +23,9 @@ spec:
         - image: lax.vultrcr.com/mercury/korg:latest
           imagePullPolicy: Always
           name: bot
+          envFrom:
+            - secretRef:
+                name: grok-secrets
           volumeMounts:
             - name: config-volume
               mountPath: /config.yaml

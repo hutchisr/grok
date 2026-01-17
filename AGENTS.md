@@ -4,7 +4,7 @@ This document provides guidance for AI agents working with this Misskey/Fedivers
 
 ## Project Overview
 
-**Grok** is a Python-based chatbot for Misskey (Fediverse) that uses DSPy and LLM endpoints to respond to mentions. The bot connects via WebSocket, processes mentions with context awareness, and can optionally use web search capabilities.
+**Grok** is a Python-based chatbot for Misskey (Fediverse) that uses Pydantic AI and LLM endpoints to respond to mentions. The bot connects via WebSocket, processes mentions with context awareness, and can optionally use web search capabilities.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ This document provides guidance for AI agents working with this Misskey/Fedivers
    - Reply sending with mention tracking
 
 2. **`bot/ai.py`** - AI/LLM integration
-   - DSPy-based `ChatAgent` using ReAct pattern
+   - Pydantic AI-based `ChatAgent` with structured output
    - Multi-endpoint fallback for reliability
    - Image description via vision models
    - Configurable tools (datetime, web search)
@@ -27,10 +27,10 @@ This document provides guidance for AI agents working with this Misskey/Fedivers
    - Configuration schema with validation
    - Note, User, and File models
 
-4. **`bot/tools.py`** - Agent tools
+4. **`bot/tools.py`** - Utility functions
    - Web search via SearXNG integration
-   - Current datetime tool
-   - Configurable tool functions
+   - Current datetime utility
+   - Note: Tools are registered directly on agents in `bot/ai.py`
 
 5. **`bot/api.py`** - HTTP client (not shown but referenced)
 
@@ -51,7 +51,6 @@ Configuration is via YAML file (see [`config.example.yaml`](config.example.yaml:
 
 ### Optional Fields
 - `searxng_url`, `searxng_user`, `searxng_password`: Web search integration
-- `model_file`: Path to optimized DSPy model
 - `max_context`: Number of parent notes to include (default: 1)
 - `max_tokens`: Token limit per response
 - `debug`: Enable debug logging
@@ -73,7 +72,7 @@ llm_endpoints:
 3. Builds context by traversing reply chain (up to `max_context`)
 4. Includes renote content if available
 5. Describes any attached images using vision models
-6. Generates reply using LLM with ReAct
+6. Generates structured reply using Pydantic AI agent
 7. Filters out self-mentions from response
 8. Sends reply with proper mention formatting
 
@@ -90,7 +89,7 @@ llm_endpoints:
 
 ### Error Handling
 - Multi-endpoint fallback for LLMs
-- Retries on TypeError (DSPy internal errors)
+- Automatic retry with next endpoint on failure
 - WebSocket auto-reconnect on disconnect
 - Task-based async processing with error logging
 
@@ -132,25 +131,44 @@ docker run -v /path/to/config.yaml:/config.yaml grok
 ## Code Patterns
 
 ### Adding New Tools
-Add functions to [`bot/tools.py`](bot/tools.py:1):
+Register tools directly on the agent in [`bot/ai.py`](bot/ai.py) using the `@agent.tool_plain` decorator:
 ```python
+@agent.tool_plain
 def my_tool(param: str) -> str:
     """Tool description for LLM"""
     # Implementation
     return result
 ```
 
-Register in [`bot/ai.py`](bot/ai.py:42):
+Or use `@agent.tool` if you need access to the `RunContext`:
 ```python
-tools = [current_datetime, my_tool]
+from pydantic_ai import RunContext
+
+@agent.tool
+def my_tool(ctx: RunContext[AgentDeps], param: str) -> str:
+    """Tool with context access"""
+    return f"User {ctx.deps.user} requested: {param}"
 ```
 
 ### Modifying Agent Behavior
-Edit the `Reply` signature in [`bot/ai.py`](bot/ai.py:16) to change input/output fields:
+Edit the `ReplyOutput` model in [`bot/ai.py`](bot/ai.py) to change output fields:
 ```python
-class Reply(dspy.Signature):
-    new_field: str = dspy.InputField(desc="Description")
-    # ... other fields
+class ReplyOutput(BaseModel):
+    """Output schema for the chat agent."""
+    reply: str
+    """Reply to the message."""
+    mentions: Optional[list[str]] = None
+    """List of usernames mentioned."""
+    new_field: str
+    """Description of new field."""
+```
+
+Modify the `AgentDeps` model to change input dependencies:
+```python
+class AgentDeps(BaseModel):
+    message: str
+    user: str
+    # Add new fields here
 ```
 
 ### Customizing System Prompt
@@ -192,9 +210,9 @@ Set `debug: true` in config for verbose logging.
 | File | Purpose |
 |------|---------|
 | [`bot/bot.py`](bot/bot.py:1) | WebSocket client, message routing |
-| [`bot/ai.py`](bot/ai.py:1) | DSPy agent, LLM orchestration |
+| [`bot/ai.py`](bot/ai.py:1) | Pydantic AI agent, LLM orchestration |
 | [`bot/models.py`](bot/models.py:1) | Pydantic models |
-| [`bot/tools.py`](bot/tools.py:1) | Agent tool functions |
+| [`bot/tools.py`](bot/tools.py:1) | Utility functions |
 | [`config.example.yaml`](config.example.yaml:1) | Configuration template |
 | [`pyproject.toml`](pyproject.toml:1) | Python dependencies |
 | [`Dockerfile`](Dockerfile:1) | Container image definition |
@@ -207,11 +225,12 @@ Set `debug: true` in config for verbose logging.
 - `POST /api/notes/show` - Fetch note details
 - WebSocket `/streaming` - Real-time events
 
-### DSPy Integration
-- Uses DSPy 3.0+ with ReAct pattern
-- Async support via `acall()` methods
-- Model optimization via `user-style.ipynb` notebook
-- History tracking for conversation context
+### Pydantic AI Integration
+- Uses Pydantic AI with structured output
+- Async support via `agent.run()` method
+- OpenAI-compatible endpoints via `OpenAIChatModel`
+- Multi-endpoint fallback for reliability
+- Conversation history passed as context in prompts
 
 ## Performance Considerations
 

@@ -19,3 +19,6 @@ config.local.yaml
 test.ipynb
 /k8s/config.yaml
 /k8s/optimized.json
+/k8s/secrets.txt
+
+mise.local.toml

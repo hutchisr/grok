@@ -51,21 +51,14 @@ class MiWebsocketMessage(BaseModel):
     body: Optional[MiWebsocketMessageBody] = None
 
 
-class LlmEndpoint(BaseModel):
-    url: AnyHttpUrl = Field(description="endpoint url")
-    key: Optional[str] = None
-    model: str = Field(description="model")
-    provider: Optional[str] = None
-
-
 class Config(BaseModel):
     domain: str = Field(description="domain")
     url: AnyHttpUrl = Field(description="url")
     ws_url: WebsocketUrl = Field(description="ws_url")
     token: str = Field(description="token")
     channel: Optional[str] = None
-    llm_endpoints: List[LlmEndpoint] = Field(description="llm_endpoints")
-    vision_endpoints: List[LlmEndpoint] = Field()
+    llm_models: List[str] = Field(description="LLM model strings (e.g., 'openrouter:anthropic/claude-3.5-sonnet')")
+    vision_models: List[str] = Field(description="Vision model strings")
     max_tokens: int = Field(gt=0)
     bot_user_id: str = Field(description="bot_user_id")
     bot_username: str = Field(description="bot_username")
@@ -75,6 +68,5 @@ class Config(BaseModel):
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
-    model_file: Optional[str] = None
     max_context: int = Field(gt=0, default=1, description="Number of context messages to include")
     debug: Optional[bool] = None

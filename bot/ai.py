@@ -1,65 +1,90 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
-from pathlib import Path
 from typing import Optional
 
-import dspy
+import httpx
+from pydantic import BaseModel
+from pydantic_ai import Agent, ImageUrl
+from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
 
 from .models import Config, Note, MiFile
-from .tools import configure_web_search, current_datetime
 
 
 logger = getLogger(__name__)
 
 
-class Reply(dspy.Signature):
-    message: str = dspy.InputField()
-    user: str = dspy.InputField(desc="Author of the message")
-    descriptions: Optional[list[str]] = dspy.InputField(
-        desc="descriptions of images included in message"
-    )
-    history: Optional[dspy.History] = dspy.InputField(desc="Conversation history")
-    location: Optional[str] = dspy.InputField(desc="location of the user, if known")
-    reply: str = dspy.OutputField(
-        desc="Reply to the message. Must NOT include mentions or usernames. Must not be None."
-    )
-    mentions: Optional[list[str]] = dspy.OutputField(
-        desc="list of usernames mentioned in the message"
-    )
+class ReplyOutput(BaseModel):
+    """Output schema for the chat agent."""
+
+    reply: str
+    """Reply to the message. Must NOT include mentions or usernames. Must not be None."""
+    mentions: Optional[list[str]] = None
+    """List of usernames mentioned in the message (without @ prefix)."""
 
 
-class ImagesSig(dspy.Signature):
-    images: list[dspy.Image] = dspy.InputField()
-    descriptions: list[str] = dspy.OutputField()
-
-
-class ChatAgent(dspy.Module):
+class ChatAgent:
     def __init__(self, config: Config):
-        super().__init__()
         self._config = config
+        self._agents: list[tuple[str, Agent[None, ReplyOutput]]] = []
+        self._vision_models = config.vision_models
 
-        tools = [current_datetime]
+        # Create an agent for each model for fallback support
+        for model in config.llm_models:
+            agent: Agent[None, ReplyOutput] = Agent(
+                model,
+                output_type=ReplyOutput,
+                instructions=config.system_prompt,
+            )
 
-        if config.searxng_url:
-            tools += [configure_web_search(config)]
+            # Register tools
+            @agent.tool_plain
+            def current_datetime() -> str:
+                """Gets current date and time"""
+                from datetime import datetime
 
-        self.generate_reply = dspy.ReAct(
-            Reply.with_instructions(config.system_prompt), tools=tools
-        )
-        self.image_describer = dspy.Predict(
-            ImagesSig.with_instructions("Describe the images provided")
-        )
+                return str(datetime.now())
 
-        if config.model_file and Path(config.model_file).is_file():
-            self.load(config.model_file)
-            logger.info(f"Loaded model {config.model_file}")
+            if config.searxng_url:
+                self._register_web_search(agent, config)
 
-    async def aforward(
+            self._agents.append((model, agent))
+
+    def _register_web_search(self, agent: Agent[None, ReplyOutput], config: Config):
+        """Register web search tool on an agent."""
+
+        @agent.tool_plain
+        def search_web(query: str) -> Optional[str]:
+            """Search the web for information."""
+            auth: Optional[httpx.BasicAuth] = None
+            if config.searxng_user and config.searxng_password:
+                auth = httpx.BasicAuth(config.searxng_user, config.searxng_password)
+            transport = httpx.HTTPTransport(retries=config.max_retries)
+            with httpx.Client(auth=auth, transport=transport) as client:
+                try:
+                    response = client.post(
+                        f"{config.searxng_url}search",
+                        params={"q": query, "format": "json"},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    return "\n---\n".join(
+                        [
+                            result.get("content")
+                            for result in data.get("results", [])[:5]
+                        ]
+                    )
+                except httpx.HTTPError:
+                    logger.exception("HTTP Error during web search")
+                    return None
+
+    async def run(
         self, note: Note, context: Optional[list[Note]] = None
-    ) -> dspy.Prediction:
+    ) -> ReplyOutput:
+        """Process a note and generate a reply."""
         if not note.text:
             raise ValueError("Note text is empty")
+
+        # Collect files from context and current note
         files: list[MiFile] = []
         if context:
             for n in context:
@@ -67,103 +92,113 @@ class ChatAgent(dspy.Module):
                     files.extend(n.files)
         if note.files:
             files.extend(note.files)
+
         logger.info(f"Checking {len(files)} file(s)")
+
+        # Describe images if present
+        descriptions = None
         if files:
             descriptions = await self.describe_images(files)
-        else:
-            descriptions = None
-        for ep in self._config.llm_endpoints:
-            while True:
-                with dspy.context(
-                    lm=dspy.LM(
-                        model=f"{ep.provider if ep.provider else "openai"}/{ep.model}",
-                        api_key=ep.key,
-                        api_base=str(ep.url),
-                        max_tokens=self._config.max_tokens,
-                        temperature=1,
-                    ),
-                ):
-                    try:
-                        output = await self.generate_reply.acall(
-                            message=note.text,
-                            user=note.user.username,
-                            descriptions=descriptions,
-                            location=note.user.location,
-                            history=dspy.History(
-                                messages=(
-                                    [
-                                        {"message": c.text, "user": c.user.username}
-                                        for c in context
-                                    ]
-                                    if context
-                                    else []
-                                )
-                            ),
+
+        # Build message history from context
+        message_history: list[ModelRequest | ModelResponse] = []
+        if context:
+            # Context is in reverse order (newest first), so reverse it
+            for c in reversed(context):
+                if c.text:
+                    # Determine if this is a bot message or user message
+                    is_bot = c.userId == self._config.bot_user_id
+                    if is_bot:
+                        # Bot's previous response
+                        message_history.append(
+                            ModelResponse(parts=[TextPart(content=c.text)])
+                        )
+                    else:
+                        # User message
+                        message_history.append(
+                            ModelRequest(parts=[UserPromptPart(content=f"{c.user.username}: {c.text}")])
                         )
 
-                        logger.info(f"Reply: {output}")
+        # Build the current prompt
+        prompt_parts = []
+        if descriptions:
+            prompt_parts.append(f"Image descriptions: {', '.join(descriptions)}")
+        if note.user.location:
+            prompt_parts.append(f"User location: {note.user.location}")
+        prompt_parts.append(f"{note.user.username}: {note.text}")
 
-                        return output
-                    except TypeError as err:
-                        logger.info(f"dspy probably ate shit ({err}), retrying...")
-                        await asyncio.sleep(0)
-                        continue
-                    except Exception:
-                        logger.exception(
-                            "Error occurred while processing message. Will try next LLM"
-                        )
-                        await asyncio.sleep(1)
-                        break
+        user_prompt = "\n".join(prompt_parts)
 
-        raise RuntimeError("All LLM endpoints failed")
+        # Try each model until one succeeds
+        last_error = None
+        for model, agent in self._agents:
+            try:
+                result = await agent.run(user_prompt, message_history=message_history)
+                logger.info(f"Reply: {result.output}")
+                return result.output
+            except Exception as e:
+                logger.exception(
+                    f"Error occurred while processing message with {model}. Will try next LLM"
+                )
+                last_error = e
+                await asyncio.sleep(1)
+                continue
+
+        raise RuntimeError(f"All LLM models failed. Last error: {last_error}")
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
-        images: list[dspy.Image] = []
+        """Describe images using vision models."""
+        image_urls: list[str] = []
         for f in files:
             logger.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
-            if f.thumbnailUrl:
-                try:
-                    images.append(
-                        await asyncio.to_thread(dspy.Image.from_url, f.thumbnailUrl)
-                    )
-                except Exception:
-                    logger.exception("Failed to load image")
-        for ep in self._config.vision_endpoints:
-            while True:
-                with dspy.context(
-                    lm=dspy.LM(
-                        model=f"{ep.provider if ep.provider else "openai"}/{ep.model}",
-                        api_key=ep.key,
-                        api_base=str(ep.url),
-                        temperature=1,
-                    ),
-                    adapter=dspy.XMLAdapter(),  # XMLAdapter doesn't use JSON mode
-                ):
-                    try:
-                        pred = await self.image_describer.acall(images=images)
-                        logger.info(f"Image descriptions: {pred}")
-                        return pred.descriptions
-                    except TypeError as err:
-                        logger.info(f"dspy probably fucked up ({err}), retrying...")
-                        await asyncio.sleep(0)
-                        continue
-                    except Exception:
-                        logger.exception(
-                            "Error occurred while processing message. Will try next LLM"
-                        )
-                        await asyncio.sleep(1)
-                        break
+            if f.thumbnailUrl and f.type.startswith("image/"):
+                image_urls.append(f.thumbnailUrl)
 
-    def forward(self, *args, **kwargs):
-        """Some bullshit to get this to run sync for prompt optimization in ipython notebooks"""
-        def run_async():
+        if not image_urls:
+            return None
+
+        # Try each vision model
+        for model in self._vision_models:
+            try:
+                vision_agent: Agent[None, str] = Agent(
+                    model,
+                    output_type=str,
+                    instructions="Describe the images provided in a concise way.",
+                )
+
+                # Build prompt with ImageUrl objects for proper multimodal input
+                prompt: list[str | ImageUrl] = ["Describe these images:"]
+                for url in image_urls:
+                    prompt.append(ImageUrl(url=url))
+
+                result = await vision_agent.run(prompt)
+                descriptions = [result.output]
+                logger.info(f"Image descriptions: {descriptions}")
+                return descriptions
+
+            except Exception:
+                logger.exception(
+                    f"Error occurred while describing images with {model}. Will try next vision model"
+                )
+                await asyncio.sleep(1)
+                continue
+
+        logger.warning("All vision models failed, returning None")
+        return None
+
+    def run_sync(self, *args, **kwargs) -> ReplyOutput:
+        """Sync wrapper for run - for compatibility with notebooks."""
+
+        def _run_async():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                return loop.run_until_complete(self.aforward(*args, **kwargs))
+                return loop.run_until_complete(self.run(*args, **kwargs))
             finally:
                 loop.close()
 
+        from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(run_async)
+            future = executor.submit(_run_async)
             return future.result()
