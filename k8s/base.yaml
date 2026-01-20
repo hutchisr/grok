@@ -23,6 +23,11 @@ spec:
         - image: lax.vultrcr.com/mercury/korg:latest
           imagePullPolicy: Always
           name: bot
+          env:
+            - name: LOGFIRE_SERVICE_NAME
+              value: grok
+            - name: LOGFIRE_ENVIRONMENT
+              value: k8s
           envFrom:
             - secretRef:
                 name: grok-secrets

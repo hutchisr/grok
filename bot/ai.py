@@ -1,16 +1,14 @@
 import asyncio
-from logging import getLogger
 from typing import Optional
 
-import httpx
 from pydantic import BaseModel
 from pydantic_ai import Agent, ImageUrl
 from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
+from pydantic_ai.models.fallback import FallbackModel
+import logfire
 
 from .models import Config, Note, MiFile
-
-
-logger = getLogger(__name__)
+from .tools import build_tools
 
 
 class ReplyOutput(BaseModel):
@@ -25,57 +23,25 @@ class ReplyOutput(BaseModel):
 class ChatAgent:
     def __init__(self, config: Config):
         self._config = config
-        self._agents: list[tuple[str, Agent[None, ReplyOutput]]] = []
-        self._vision_models = config.vision_models
 
-        # Create an agent for each model for fallback support
-        for model in config.llm_models:
-            agent: Agent[None, ReplyOutput] = Agent(
-                model,
-                output_type=ReplyOutput,
-                instructions=config.system_prompt,
-            )
+        # Create fallback model from all configured models
+        if len(config.llm_models) == 1:
+            model = config.llm_models[0]
+        else:
+            model = FallbackModel(*config.llm_models)
 
-            # Register tools
-            @agent.tool_plain
-            def current_datetime() -> str:
-                """Gets current date and time"""
-                from datetime import datetime
+        # Create vision fallback model
+        if len(config.vision_models) == 1:
+            self._vision_model = config.vision_models[0]
+        else:
+            self._vision_model = FallbackModel(*config.vision_models)
 
-                return str(datetime.now())
-
-            if config.searxng_url:
-                self._register_web_search(agent, config)
-
-            self._agents.append((model, agent))
-
-    def _register_web_search(self, agent: Agent[None, ReplyOutput], config: Config):
-        """Register web search tool on an agent."""
-
-        @agent.tool_plain
-        def search_web(query: str) -> Optional[str]:
-            """Search the web for information."""
-            auth: Optional[httpx.BasicAuth] = None
-            if config.searxng_user and config.searxng_password:
-                auth = httpx.BasicAuth(config.searxng_user, config.searxng_password)
-            transport = httpx.HTTPTransport(retries=config.max_retries)
-            with httpx.Client(auth=auth, transport=transport) as client:
-                try:
-                    response = client.post(
-                        f"{config.searxng_url}search",
-                        params={"q": query, "format": "json"},
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    return "\n---\n".join(
-                        [
-                            result.get("content")
-                            for result in data.get("results", [])[:5]
-                        ]
-                    )
-                except httpx.HTTPError:
-                    logger.exception("HTTP Error during web search")
-                    return None
+        self._agent: Agent[None, ReplyOutput] = Agent(
+            model,
+            output_type=ReplyOutput,
+            instructions=config.system_prompt,
+            tools=build_tools(config),
+        )
 
     async def run(
         self, note: Note, context: Optional[list[Note]] = None
@@ -92,8 +58,6 @@ class ChatAgent:
                     files.extend(n.files)
         if note.files:
             files.extend(note.files)
-
-        logger.info(f"Checking {len(files)} file(s)")
 
         # Describe images if present
         descriptions = None
@@ -129,62 +93,43 @@ class ChatAgent:
 
         user_prompt = "\n".join(prompt_parts)
 
-        # Try each model until one succeeds
-        last_error = None
-        for model, agent in self._agents:
-            try:
-                result = await agent.run(user_prompt, message_history=message_history)
-                logger.info(f"Reply: {result.output}")
-                return result.output
-            except Exception as e:
-                logger.exception(
-                    f"Error occurred while processing message with {model}. Will try next LLM"
-                )
-                last_error = e
-                await asyncio.sleep(1)
-                continue
-
-        raise RuntimeError(f"All LLM models failed. Last error: {last_error}")
+        # Run with fallback model
+        result = await self._agent.run(user_prompt, message_history=message_history)
+        logfire.info(f"Reply: {result.output}")
+        return result.output
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
         """Describe images using vision models."""
         image_urls: list[str] = []
         for f in files:
-            logger.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
+            logfire.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
             if f.thumbnailUrl and f.type.startswith("image/"):
                 image_urls.append(f.thumbnailUrl)
 
         if not image_urls:
             return None
 
-        # Try each vision model
-        for model in self._vision_models:
-            try:
-                vision_agent: Agent[None, str] = Agent(
-                    model,
-                    output_type=str,
-                    instructions="Describe the images provided in a concise way.",
-                )
+        # Use vision model with fallback
+        try:
+            vision_agent: Agent[None, str] = Agent(
+                self._vision_model,
+                output_type=str,
+                instructions="Describe the images provided in a concise way.",
+            )
 
-                # Build prompt with ImageUrl objects for proper multimodal input
-                prompt: list[str | ImageUrl] = ["Describe these images:"]
-                for url in image_urls:
-                    prompt.append(ImageUrl(url=url))
+            # Build prompt with ImageUrl objects for proper multimodal input
+            prompt: list[str | ImageUrl] = ["Describe these images:"]
+            for url in image_urls:
+                prompt.append(ImageUrl(url=url))
 
-                result = await vision_agent.run(prompt)
-                descriptions = [result.output]
-                logger.info(f"Image descriptions: {descriptions}")
-                return descriptions
+            result = await vision_agent.run(prompt)
+            descriptions = [result.output]
+            logfire.info(f"Image descriptions: {descriptions}")
+            return descriptions
 
-            except Exception:
-                logger.exception(
-                    f"Error occurred while describing images with {model}. Will try next vision model"
-                )
-                await asyncio.sleep(1)
-                continue
-
-        logger.warning("All vision models failed, returning None")
-        return None
+        except Exception:
+            logfire.exception("Error occurred while describing images")
+            return None
 
     def run_sync(self, *args, **kwargs) -> ReplyOutput:
         """Sync wrapper for run - for compatibility with notebooks."""

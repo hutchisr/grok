@@ -1,12 +1,10 @@
 import asyncio
 import threading
-from logging import getLogger
 from typing import Optional, cast, TYPE_CHECKING
 
 import httpx
+import logfire
 from .models import Config
-
-logger = getLogger(__name__)
 
 
 class ApiClient:
@@ -27,7 +25,7 @@ class ApiClient:
                         headers={"Authorization": f"Bearer {self.__config.token}"},
                     )
                 else:
-                    logger.warning("API client accessed before configuration")
+                    logfire.warning("API client accessed before configuration")
                     self.__async_client = httpx.AsyncClient()
         return self.__async_client
 

@@ -1,5 +1,4 @@
 import json
-from logging import getLogger
 import re
 
 import asyncio
@@ -8,12 +7,11 @@ from pydantic import ValidationError
 from websockets import ClientConnection, ConnectionClosed
 from websockets.asyncio.client import connect
 import httpx
+import logfire
 
 from .ai import ChatAgent, ReplyOutput
 from .models import Config, MiWebsocketMessage, Note
 from .api import api_client
-
-logger = getLogger(__name__)
 
 
 class Bot:
@@ -36,13 +34,13 @@ class Bot:
 
     async def on_mention(self, note: Note):
         if note.user.id == self.user_id:
-            logger.debug("Ignoring own mention")
+            logfire.debug("Ignoring own mention")
             return
         if not note.text:
-            logger.debug(f"Empty note? {note}")
+            logfire.debug(f"Empty note? {note}")
             return
-        logger.info(
-            f"Received note: {note.id} `{note.user.username}: {note.text.replace("\n", "⏎")[:100]}`"
+        logfire.info(
+            f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`"
         )
         context: Optional[list[Note]] = []
         if note.replyId:
@@ -51,7 +49,7 @@ class Bot:
                 try:
                     reply = await self.get_note(reply_id)
                 except httpx.HTTPError:
-                    logger.exception("Error fetching context")
+                    logfire.exception("Error fetching context")
                     break
                 # Add to context if it has text OR files
                 if reply.text or reply.files:
@@ -101,7 +99,7 @@ class Bot:
 
         response = await api_client.post(f"{self.url}api/notes/create", json=payload)
         response.raise_for_status()
-        logger.info(f"Sent note: {response.json().get("createdNote").get("id")}")
+        logfire.info(f"Sent note: {response.json().get('createdNote').get('id')}")
 
     async def get_note(self, note_id: str) -> Note:
         response = await api_client.post(
@@ -111,11 +109,11 @@ class Bot:
         response.raise_for_status()
         note = response.json()
         note = Note(**note)
-        logger.info(f"Fetched note: {note.id} with {len(note.files) if note.files else "no"} file(s)")
+        logfire.info(f"Fetched note: {note.id} with {len(note.files) if note.files else 'no'} file(s)")
         return note
 
     async def run(self):
-        logger.info("Connecting to WebSocket...")
+        logfire.info("Connecting to WebSocket...")
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
                 await websocket.send(
@@ -123,7 +121,7 @@ class Bot:
                         {"type": "connect", "body": {"channel": "main", "id": "11111"}}
                     )
                 )
-                logger.info("WebSocket connected")
+                logfire.info("WebSocket connected")
 
                 shutdown_task = asyncio.create_task(self._shutdown_event.wait())
                 message_task = asyncio.create_task(self._handle_messages(websocket))
@@ -133,35 +131,35 @@ class Bot:
                 )
 
                 if shutdown_task in done:
-                    logger.info("Shutdown requested, closing connection")
+                    logfire.info("Shutdown requested, closing connection")
                     await websocket.close()
                     return
 
             except ConnectionClosed:
                 if self._shutdown_event.is_set():
                     return
-                logger.warning("WebSocket connection closed, reconnecting...")
+                logfire.warning("WebSocket connection closed, reconnecting...")
                 continue
 
     async def _handle_messages(self, websocket: ClientConnection):
         async for message in websocket:
             try:
                 msg = MiWebsocketMessage(**json.loads(message))
-                logger.debug(f"{msg}")
+                logfire.debug(f"{msg}")
                 if msg.type == "channel" and msg.body and msg.body.type in {"mention"}:
                     if msg.body and msg.body.body:
                         task = asyncio.create_task(self.on_mention(msg.body.body))
                         task.add_done_callback(self._task_done_callback)
             except ValidationError as e:
-                logger.debug(
+                logfire.debug(
                     f"Validation error: {e}. Message doesn't match expected format, ignoring."
                 )
                 pass
             except asyncio.CancelledError:
-                logger.info("Message handler cancelled")
+                logfire.info("Message handler cancelled")
                 raise
             except Exception:
-                logger.exception("Error processing message")
+                logfire.exception("Error processing message")
 
     def _task_done_callback(self, task: asyncio.Task):
         """Handle completed tasks - log exceptions and discard."""
@@ -171,7 +169,7 @@ class Bot:
         try:
             task.result()  # This will raise any exception that occurred
         except Exception:
-            logger.exception("Task failed with exception")
+            logfire.exception("Task failed with exception")
 
     def shutdown(self):
         self._shutdown_event.set()

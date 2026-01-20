@@ -18,6 +18,7 @@ vision_models:
 
 max_tokens: 512
 max_retries: 1
+http_timeout_seconds: 30
 
 
 max_memory: 5

@@ -65,6 +65,11 @@ class Config(BaseModel):
     system_prompt: str = Field(description="system_prompt")
     system_prompt_auto: str = Field(description="system_prompt_auto")
     max_retries: int = Field(gt=0)
+    http_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="HTTP client timeout in seconds",
+    )
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
