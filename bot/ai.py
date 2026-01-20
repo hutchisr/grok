@@ -80,7 +80,13 @@ class ChatAgent:
                     else:
                         # User message
                         message_history.append(
-                            ModelRequest(parts=[UserPromptPart(content=f"{c.user.username}: {c.text}")])
+                            ModelRequest(
+                                parts=[
+                                    UserPromptPart(
+                                        content=f"{c.user.username}: {c.text}"
+                                    )
+                                ]
+                            )
                         )
 
         # Build the current prompt
@@ -100,36 +106,39 @@ class ChatAgent:
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
         """Describe images using vision models."""
-        image_urls: list[str] = []
-        for f in files:
-            logfire.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
-            if f.thumbnailUrl and f.type.startswith("image/"):
-                image_urls.append(f.thumbnailUrl)
+        with logfire.span("describe images", file_count=len(files)):
+            image_urls: list[str] = []
+            for f in files:
+                logfire.info(
+                    f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}"
+                )
+                if f.thumbnailUrl and f.type.startswith("image/"):
+                    image_urls.append(f.thumbnailUrl)
 
-        if not image_urls:
-            return None
+            if not image_urls:
+                return None
 
-        # Use vision model with fallback
-        try:
-            vision_agent: Agent[None, str] = Agent(
-                self._vision_model,
-                output_type=str,
-                instructions="Describe the images provided in a concise way.",
-            )
+            # Use vision model with fallback
+            try:
+                vision_agent: Agent[None, str] = Agent(
+                    self._vision_model,
+                    output_type=str,
+                    instructions="Describe the images provided in a concise way.",
+                )
 
-            # Build prompt with ImageUrl objects for proper multimodal input
-            prompt: list[str | ImageUrl] = ["Describe these images:"]
-            for url in image_urls:
-                prompt.append(ImageUrl(url=url))
+                # Build prompt with ImageUrl objects for proper multimodal input
+                prompt: list[str | ImageUrl] = ["Describe these images:"]
+                for url in image_urls:
+                    prompt.append(ImageUrl(url=url))
 
-            result = await vision_agent.run(prompt)
-            descriptions = [result.output]
-            logfire.info(f"Image descriptions: {descriptions}")
-            return descriptions
+                result = await vision_agent.run(prompt)
+                descriptions = [result.output]
+                logfire.info(f"Image descriptions: {descriptions}")
+                return descriptions
 
-        except Exception:
-            logfire.exception("Error occurred while describing images")
-            return None
+            except Exception:
+                logfire.exception("Error occurred while describing images")
+                return None
 
     def run_sync(self, *args, **kwargs) -> ReplyOutput:
         """Sync wrapper for run - for compatibility with notebooks."""

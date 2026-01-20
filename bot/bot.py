@@ -10,7 +10,7 @@ import httpx
 import logfire
 
 from .ai import ChatAgent, ReplyOutput
-from .models import Config, MiWebsocketMessage, Note
+from .models import Config, MiWebsocketMessage, Note, User
 from .api import api_client
 
 
@@ -33,65 +33,54 @@ class Bot:
         self._shutdown_event = asyncio.Event()
 
     async def on_mention(self, note: Note):
-        if note.user.id == self.user_id:
-            logfire.debug("Ignoring own mention")
-            return
-        if not note.text:
-            logfire.debug(f"Empty note? {note}")
-            return
-        logfire.info(
-            f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`"
-        )
-        context: Optional[list[Note]] = []
-        if note.replyId:
-            reply_id = note.replyId
-            for _ in range(self._config.max_context):
-                try:
-                    reply = await self.get_note(reply_id)
-                except httpx.HTTPError:
-                    logfire.exception("Error fetching context")
-                    break
-                # Add to context if it has text OR files
-                if reply.text or reply.files:
-                    context.append(reply)
-                # fetch next note in thread
-                if reply.replyId:
-                    reply_id = reply.replyId
-                else:
-                    break
-        if note.renote and (note.renote.text or note.renote.files):
-            context.append(note.renote)
-        result = await self._agent.run(note=note, context=context)
-        await self.send_note(result, in_reply_to=note)
+        with logfire.span(
+            "handle mention",
+            note_id=note.id,
+            user_id=note.user.id,
+            username=note.user.username,
+            has_reply=bool(note.replyId),
+            has_renote=bool(note.renote),
+        ):
+            if note.user.id == self.user_id:
+                logfire.debug("Ignoring own mention")
+                return
+            if not note.text:
+                logfire.debug(f"Empty note? {note}")
+                return
+            logfire.info(
+                f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`"
+            )
+            context: Optional[list[Note]] = []
+            if note.replyId:
+                reply_id = note.replyId
+                for _ in range(self._config.max_context):
+                    try:
+                        reply = await self.get_note(reply_id)
+                    except httpx.HTTPError:
+                        logfire.exception("Error fetching context")
+                        break
+                    # Add to context if it has text OR files
+                    if reply.text or reply.files:
+                        context.append(reply)
+                    # fetch next note in thread
+                    if reply.replyId:
+                        reply_id = reply.replyId
+                    else:
+                        break
+            if note.renote and (note.renote.text or note.renote.files):
+                context.append(note.renote)
+            result = await self._agent.run(note=note, context=context)
+            await self.send_note(result, in_reply_to=note)
 
     async def send_note(
         self,
         output: ReplyOutput,
         in_reply_to: Optional[Note] = None,
     ):
-        # Filter out bot's own username from mentions
-        mentions = (
-            {
-                f"{mention if mention.startswith("@") else "@" + mention}"
-                for mention in output.mentions
-                if not re.match(
-                    rf"^@?{self._config.bot_username}(@{self._config.domain})?$",
-                    mention.strip(),
-                    re.IGNORECASE
-                )
-            }
-            if output.mentions and isinstance(output.mentions, list)
-            else set()
-        )
-
-        if in_reply_to and in_reply_to.user:
-            username = f"@{in_reply_to.user.username}"
-            if in_reply_to.user.host:
-                username += f"@{in_reply_to.user.host}"
-            mentions.add(username)
+        mentions = await self._build_mentions_from_note(in_reply_to)
 
         payload = {
-            "text": f"{' '.join(mentions)}\n{re.sub(r"^@[\w\-]+(:?@[\w\-\.]+)?\s+", "", output.reply or "")}",
+            "text": f"{' '.join(mentions)}\n{self._strip_leading_mentions(output.reply or "")}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:
@@ -101,6 +90,61 @@ class Bot:
         response.raise_for_status()
         logfire.info(f"Sent note: {response.json().get('createdNote').get('id')}")
 
+    async def _build_mentions_from_note(self, note: Optional[Note]) -> list[str]:
+        if not note or not note.user:
+            return []
+
+        mentions: list[str] = []
+        if note.mentions:
+            for mention in note.mentions:
+                normalized = await self._normalize_note_mention(mention)
+                if not normalized:
+                    continue
+                if re.match(
+                    rf"^@?{self._config.bot_username}(@{self._config.domain})?$",
+                    normalized.strip(),
+                    re.IGNORECASE,
+                ):
+                    continue
+                mentions.append(normalized)
+
+        mentions.append(self._format_handle(note.user))
+        return self._unique_ordered(mentions)
+
+    async def _normalize_note_mention(self, mention: str) -> Optional[str]:
+        raw = mention.strip()
+        if not raw:
+            return None
+
+        raw = raw.lstrip("@")
+        if not raw:
+            return None
+
+        if "@" in raw:
+            username, host = raw.split("@", 1)
+            if not username:
+                return None
+            return f"@{username}@{host}" if host else f"@{username}"
+
+        resolved = await self._resolve_user_handle(raw)
+        return resolved or f"@{raw}"
+
+    async def _resolve_user_handle(self, user_id: str) -> Optional[str]:
+        try:
+            response = await api_client.post(
+                f"{self.url}api/users/show",
+                json={"userId": user_id},
+            )
+            response.raise_for_status()
+            data = response.json()
+            username = data.get("username")
+            if not username:
+                return None
+            host = data.get("host")
+            return f"@{username}@{host}" if host else f"@{username}"
+        except httpx.HTTPError:
+            return None
+
     async def get_note(self, note_id: str) -> Note:
         response = await api_client.post(
             f"{self.url}api/notes/show",
@@ -109,25 +153,32 @@ class Bot:
         response.raise_for_status()
         note = response.json()
         note = Note(**note)
-        logfire.info(f"Fetched note: {note.id} with {len(note.files) if note.files else 'no'} file(s)")
+        logfire.info(
+            f"Fetched note: {note.id} with {len(note.files) if note.files else 'no'} file(s)"
+        )
         return note
 
     async def run(self):
         logfire.info("Connecting to WebSocket...")
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
-                await websocket.send(
-                    json.dumps(
-                        {"type": "connect", "body": {"channel": "main", "id": "11111"}}
+                with logfire.span("connect websocket"):
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "connect",
+                                "body": {"channel": "main", "id": "11111"},
+                            }
+                        )
                     )
-                )
                 logfire.info("WebSocket connected")
 
                 shutdown_task = asyncio.create_task(self._shutdown_event.wait())
                 message_task = asyncio.create_task(self._handle_messages(websocket))
 
                 done, pending = await asyncio.wait(
-                    [shutdown_task, message_task], return_when=asyncio.FIRST_COMPLETED
+                    [shutdown_task, message_task],
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
 
                 if shutdown_task in done:
@@ -173,3 +224,23 @@ class Bot:
 
     def shutdown(self):
         self._shutdown_event.set()
+
+    def _format_handle(self, user: User) -> str:
+        handle = f"@{user.username}"
+        if user.host:
+            handle += f"@{user.host}"
+        return handle
+
+
+    def _unique_ordered(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return result
+
+    def _strip_leading_mentions(self, text: str) -> str:
+        return re.sub(r"^(?:@[\w\-]+(?:@[\w\-\.]+)?\s+)+", "", text)
