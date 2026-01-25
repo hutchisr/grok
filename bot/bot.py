@@ -153,8 +153,13 @@ class Bot:
         response.raise_for_status()
         note = response.json()
         note = Note(**note)
+        text_preview = note.text.replace("\n", "⏎")[:100] if note.text else ""
         logfire.info(
-            f"Fetched note: {note.id} with {len(note.files) if note.files else 'no'} file(s)"
+            "Fetched note",
+            note_id=note.id,
+            username=note.user.username if note.user else "unknown",
+            file_count=len(note.files) if note.files else 0,
+            text_preview=text_preview,
         )
         return note
 
