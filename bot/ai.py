@@ -1,9 +1,10 @@
 import asyncio
-from typing import Optional
+import inspect
+import json
+from typing import Callable, Optional
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, ImageUrl
-from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
 from pydantic_ai.models.fallback import FallbackModel
 import logfire
 
@@ -18,6 +19,17 @@ class ReplyOutput(BaseModel):
     """Reply to the message. Must NOT include mentions or usernames. Must not be None."""
     mentions: Optional[list[str]] = None
     """List of usernames mentioned in the message (without @ prefix)."""
+
+
+class ReActStep(BaseModel):
+    """Single ReAct step output."""
+
+    action: str
+    """Tool name to call, or 'final'."""
+    action_input: Optional[str] = None
+    """Tool input. Can be plain text or JSON string for args."""
+    final: Optional[str] = None
+    """Final reply when action == 'final'."""
 
 
 class ChatAgent:
@@ -36,11 +48,29 @@ class ChatAgent:
         else:
             self._vision_model = FallbackModel(*config.vision_models)
 
-        self._agent: Agent[None, ReplyOutput] = Agent(
+        self._tools = build_tools(config)
+        self._tool_map = {tool.__name__: tool for tool in self._tools}
+        self._tool_descriptions = self._format_tool_descriptions(self._tools)
+        self._max_react_steps = 6
+
+        react_instructions = (
+            "You MUST use an explicit ReAct loop. Available tools:\n"
+            f"{self._tool_descriptions}\n\n"
+            "At each step, output a ReActStep with:\n"
+            "- action: a tool name from the list, OR 'final'\n"
+            "- action_input: tool input as plain text or JSON string for args\n"
+            "- final: only when action == 'final'\n\n"
+            "Do not reveal chain-of-thought. Do not include tool deliberations. "
+            "Only provide the final reply in the 'final' field when done. "
+            "The final reply must NOT include mentions or usernames."
+        )
+
+        combined_instructions = f"{config.system_prompt}\n\n{react_instructions}"
+
+        self._react_agent: Agent[None, ReActStep] = Agent(
             model,
-            output_type=ReplyOutput,
-            instructions=config.system_prompt,
-            tools=build_tools(config),
+            output_type=ReActStep,
+            instructions=combined_instructions,
         )
 
     async def run(
@@ -64,31 +94,6 @@ class ChatAgent:
         if files:
             descriptions = await self.describe_images(files)
 
-        # Build message history from context
-        message_history: list[ModelRequest | ModelResponse] = []
-        if context:
-            # Context is in reverse order (newest first), so reverse it
-            for c in reversed(context):
-                if c.text:
-                    # Determine if this is a bot message or user message
-                    is_bot = c.userId == self._config.bot_user_id
-                    if is_bot:
-                        # Bot's previous response
-                        message_history.append(
-                            ModelResponse(parts=[TextPart(content=c.text)])
-                        )
-                    else:
-                        # User message
-                        message_history.append(
-                            ModelRequest(
-                                parts=[
-                                    UserPromptPart(
-                                        content=f"{c.user.username}: {c.text}"
-                                    )
-                                ]
-                            )
-                        )
-
         # Build the current prompt
         prompt_parts = []
         if descriptions:
@@ -99,10 +104,22 @@ class ChatAgent:
 
         user_prompt = "\n".join(prompt_parts)
 
-        # Run with fallback model
-        result = await self._agent.run(user_prompt, message_history=message_history)
-        logfire.info(f"Reply: {result.output}")
-        return result.output
+        # Build context text
+        context_lines: list[str] = []
+        if context:
+            for c in reversed(context):
+                if c.text:
+                    context_lines.append(f"{c.user.username}: {c.text}")
+
+        base_prompt_parts: list[str] = []
+        if context_lines:
+            base_prompt_parts.append("Conversation so far:\n" + "\n".join(context_lines))
+        base_prompt_parts.append("Current message:\n" + user_prompt)
+        base_prompt = "\n\n".join(base_prompt_parts)
+
+        result = await self._run_react(base_prompt)
+        logfire.info(f"Reply: {result}")
+        return result
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
         """Describe images using vision models."""
@@ -156,3 +173,89 @@ class ChatAgent:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_async)
             return future.result()
+
+    def _format_tool_descriptions(
+        self, tools: list[Callable[..., object]]
+    ) -> str:
+        lines = []
+        for tool in tools:
+            name = tool.__name__
+            doc = inspect.getdoc(tool) or ""
+            if doc:
+                doc = " ".join(doc.split())
+            lines.append(f"- {name}: {doc}".strip())
+        return "\n".join(lines)
+
+    async def _run_react(self, base_prompt: str) -> ReplyOutput:
+        steps: list[dict[str, str]] = []
+        tool_names = ", ".join(self._tool_map.keys())
+
+        for step_index in range(1, self._max_react_steps + 1):
+            react_prompt_parts = [base_prompt]
+            if steps:
+                react_prompt_parts.append("\nPrevious actions and observations:")
+                for idx, step in enumerate(steps, start=1):
+                    react_prompt_parts.append(
+                        "\n".join(
+                            [
+                                f"Step {idx}:",
+                                f"Action: {step['action']}",
+                                f"Input: {step['action_input']}",
+                                f"Observation: {step['observation']}",
+                            ]
+                        )
+                    )
+
+            react_prompt_parts.append(
+                "\nDecide your next action. If you have enough information, return action='final'."
+            )
+
+            react_prompt = "\n\n".join(react_prompt_parts)
+            result = await self._react_agent.run(react_prompt)
+            output = result.output
+
+            action = (output.action or "").strip()
+            action_input = (output.action_input or "").strip()
+
+            if action == "final":
+                reply = (output.final or "").strip()
+                return ReplyOutput(reply=reply, mentions=None)
+
+            if action not in self._tool_map:
+                observation = (
+                    f"Unknown tool '{action}'. Available tools: {tool_names}."
+                )
+            else:
+                observation = await asyncio.to_thread(
+                    self._call_tool_sync,
+                    self._tool_map[action],
+                    action_input,
+                )
+
+            steps.append(
+                {
+                    "action": action or "(none)",
+                    "action_input": action_input or "(none)",
+                    "observation": str(observation),
+                }
+            )
+
+        return ReplyOutput(
+            reply="Sorry, I couldn't complete that within the allowed steps.",
+            mentions=None,
+        )
+
+    def _call_tool_sync(self, tool: Callable[..., object], action_input: str) -> object:
+        if not action_input:
+            return tool()
+
+        try:
+            parsed = json.loads(action_input)
+        except json.JSONDecodeError:
+            return tool(action_input)
+
+        if isinstance(parsed, dict):
+            return tool(**parsed)
+        if isinstance(parsed, list):
+            return tool(*parsed)
+        return tool(str(parsed))
