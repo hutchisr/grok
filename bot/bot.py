@@ -4,6 +4,7 @@ import re
 import asyncio
 from typing import Optional
 from pydantic import ValidationError
+from redis.asyncio import Redis
 from websockets import ClientConnection, ConnectionClosed
 from websockets.asyncio.client import connect
 import httpx
@@ -18,6 +19,7 @@ class Bot:
     def __init__(
         self,
         config: Config,
+        redis_client: Optional[Redis] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         self.url = config.url
@@ -29,7 +31,8 @@ class Bot:
         self.ws: Optional[ClientConnection] = None
 
         self._config = config
-        self._agent = ChatAgent(config)
+        self._redis = redis_client
+        self._agent = ChatAgent(config, redis_client=redis_client)
         self._shutdown_event = asyncio.Event()
 
     async def on_mention(self, note: Note):

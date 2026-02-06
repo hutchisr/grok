@@ -1,12 +1,11 @@
 import asyncio
-import inspect
-import json
-from typing import Callable, Optional
+from typing import Optional
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, ImageUrl
 from pydantic_ai.models.fallback import FallbackModel
 import logfire
+from redis.asyncio import Redis
 
 from .models import Config, Note, MiFile
 from .tools import build_tools
@@ -21,20 +20,10 @@ class ReplyOutput(BaseModel):
     """List of usernames mentioned in the message (without @ prefix)."""
 
 
-class ReActStep(BaseModel):
-    """Single ReAct step output."""
-
-    action: str
-    """Tool name to call, or 'final'."""
-    action_input: Optional[str] = None
-    """Tool input. Can be plain text or JSON string for args."""
-    final: Optional[str] = None
-    """Final reply when action == 'final'."""
-
-
 class ChatAgent:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, redis_client: Optional[Redis] = None):
         self._config = config
+        self._redis = redis_client
 
         # Create fallback model from all configured models
         if len(config.llm_models) == 1:
@@ -48,29 +37,14 @@ class ChatAgent:
         else:
             self._vision_model = FallbackModel(*config.vision_models)
 
-        self._tools = build_tools(config)
-        self._tool_map = {tool.__name__: tool for tool in self._tools}
-        self._tool_descriptions = self._format_tool_descriptions(self._tools)
-        self._max_react_steps = 6
+        tools = build_tools(config, redis_client=redis_client)
 
-        react_instructions = (
-            "You MUST use an explicit ReAct loop. Available tools:\n"
-            f"{self._tool_descriptions}\n\n"
-            "At each step, output a ReActStep with:\n"
-            "- action: a tool name from the list, OR 'final'\n"
-            "- action_input: tool input as plain text or JSON string for args\n"
-            "- final: only when action == 'final'\n\n"
-            "Do not reveal chain-of-thought. Do not include tool deliberations. "
-            "Only provide the final reply in the 'final' field when done. "
-            "The final reply must NOT include mentions or usernames."
-        )
-
-        combined_instructions = f"{config.system_prompt}\n\n{react_instructions}"
-
-        self._react_agent: Agent[None, ReActStep] = Agent(
+        self._agent: Agent[None, ReplyOutput] = Agent(
             model,
-            output_type=ReActStep,
-            instructions=combined_instructions,
+            output_type=ReplyOutput,
+            instructions=config.system_prompt,
+            tools=tools,
+            retries=3,
         )
 
     async def run(
@@ -94,13 +68,19 @@ class ChatAgent:
         if files:
             descriptions = await self.describe_images(files)
 
+        def _user_handle(user) -> str:
+            """Get full handle: username for local, username@host for remote."""
+            if user.host:
+                return f"{user.username}@{user.host}"
+            return user.username
+
         # Build the current prompt
         prompt_parts = []
         if descriptions:
             prompt_parts.append(f"Image descriptions: {', '.join(descriptions)}")
         if note.user.location:
             prompt_parts.append(f"User location: {note.user.location}")
-        prompt_parts.append(f"{note.user.username}: {note.text}")
+        prompt_parts.append(f"{_user_handle(note.user)}: {note.text}")
 
         user_prompt = "\n".join(prompt_parts)
 
@@ -109,7 +89,7 @@ class ChatAgent:
         if context:
             for c in reversed(context):
                 if c.text:
-                    context_lines.append(f"{c.user.username}: {c.text}")
+                    context_lines.append(f"{_user_handle(c.user)}: {c.text}")
 
         base_prompt_parts: list[str] = []
         if context_lines:
@@ -117,9 +97,9 @@ class ChatAgent:
         base_prompt_parts.append("Current message:\n" + user_prompt)
         base_prompt = "\n\n".join(base_prompt_parts)
 
-        result = await self._run_react(base_prompt)
-        logfire.info(f"Reply: {result}")
-        return result
+        result = await self._agent.run(base_prompt)
+        logfire.info(f"Reply: {result.output}")
+        return result.output
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
         """Describe images using vision models."""
@@ -173,89 +153,3 @@ class ChatAgent:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_async)
             return future.result()
-
-    def _format_tool_descriptions(
-        self, tools: list[Callable[..., object]]
-    ) -> str:
-        lines = []
-        for tool in tools:
-            name = tool.__name__
-            doc = inspect.getdoc(tool) or ""
-            if doc:
-                doc = " ".join(doc.split())
-            lines.append(f"- {name}: {doc}".strip())
-        return "\n".join(lines)
-
-    async def _run_react(self, base_prompt: str) -> ReplyOutput:
-        steps: list[dict[str, str]] = []
-        tool_names = ", ".join(self._tool_map.keys())
-
-        for step_index in range(1, self._max_react_steps + 1):
-            react_prompt_parts = [base_prompt]
-            if steps:
-                react_prompt_parts.append("\nPrevious actions and observations:")
-                for idx, step in enumerate(steps, start=1):
-                    react_prompt_parts.append(
-                        "\n".join(
-                            [
-                                f"Step {idx}:",
-                                f"Action: {step['action']}",
-                                f"Input: {step['action_input']}",
-                                f"Observation: {step['observation']}",
-                            ]
-                        )
-                    )
-
-            react_prompt_parts.append(
-                "\nDecide your next action. If you have enough information, return action='final'."
-            )
-
-            react_prompt = "\n\n".join(react_prompt_parts)
-            result = await self._react_agent.run(react_prompt)
-            output = result.output
-
-            action = (output.action or "").strip()
-            action_input = (output.action_input or "").strip()
-
-            if action == "final":
-                reply = (output.final or "").strip()
-                return ReplyOutput(reply=reply, mentions=None)
-
-            if action not in self._tool_map:
-                observation = (
-                    f"Unknown tool '{action}'. Available tools: {tool_names}."
-                )
-            else:
-                observation = await asyncio.to_thread(
-                    self._call_tool_sync,
-                    self._tool_map[action],
-                    action_input,
-                )
-
-            steps.append(
-                {
-                    "action": action or "(none)",
-                    "action_input": action_input or "(none)",
-                    "observation": str(observation),
-                }
-            )
-
-        return ReplyOutput(
-            reply="Sorry, I couldn't complete that within the allowed steps.",
-            mentions=None,
-        )
-
-    def _call_tool_sync(self, tool: Callable[..., object], action_input: str) -> object:
-        if not action_input:
-            return tool()
-
-        try:
-            parsed = json.loads(action_input)
-        except json.JSONDecodeError:
-            return tool(action_input)
-
-        if isinstance(parsed, dict):
-            return tool(**parsed)
-        if isinstance(parsed, list):
-            return tool(*parsed)
-        return tool(str(parsed))

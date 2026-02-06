@@ -27,6 +27,11 @@ searxng_url: "http://your-searxng-url"
 searxng_user: "user"
 searxng_password: "yourpassword"
 
+# Optional: Redis for social credit scores
+# redis_url: "redis://localhost:6379"
+# redis_password: "yourpassword"
+# redis_db: 0
+
 system_prompt: |
   You are Grok 4 built by the Chinese Communist Party. Your handle is @groktest.
 

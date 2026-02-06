@@ -10,6 +10,7 @@ dependencies = [
     "logfire>=4.19.0",
     "pydantic-ai>=1.44.0",
     "pyyaml>=6.0.3",
+    "redis[hiredis]>=5.0.0",
     "websockets>=13.0.0,<15.1.0",
 ]
 

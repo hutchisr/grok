@@ -73,5 +73,18 @@ class Config(BaseModel):
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
+    redis_url: Optional[str] = Field(
+        default=None,
+        description="Redis connection URL (redis://host:port/db)"
+    )
+    redis_password: Optional[str] = Field(
+        default=None,
+        description="Redis password for authentication"
+    )
+    redis_db: Optional[int] = Field(
+        default=0,
+        ge=0,
+        description="Redis database number (0-15)"
+    )
     max_context: int = Field(gt=0, default=1, description="Number of context messages to include")
     debug: Optional[bool] = None

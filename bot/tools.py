@@ -1,11 +1,13 @@
 """Tool utilities for the Grok bot."""
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Optional
 
 import httpx
 import logfire
+from redis.asyncio import Redis
 
 from .models import Config
 
@@ -15,7 +17,7 @@ def current_datetime() -> str:
     return str(datetime.now())
 
 
-def build_tools(config: Config) -> list[Callable[..., object]]:
+def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Callable[..., object]]:
     """Create tool functions for the given config.
 
     Tools are returned as plain functions and can be passed to Agent(..., tools=...).
@@ -126,6 +128,13 @@ def build_tools(config: Config) -> list[Callable[..., object]]:
                     return (
                         f"Created note {note_id}." if note_id else "Note created."
                     )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 400:
+                        text_len = len(f"{mention_prefix}{text}")
+                        logfire.warning(f"Note creation failed: 400 Bad Request (text length: {text_len})")
+                        return f"Error: Note rejected (400 Bad Request). The text is likely too long ({text_len} chars). Please shorten it significantly and try again."
+                    logfire.exception("HTTP Status Error during note creation")
+                    return f"Error creating note: {e.response.status_code}"
                 except httpx.HTTPError:
                     logfire.exception("HTTP Error during note creation")
                     return None
@@ -207,4 +216,146 @@ def build_tools(config: Config) -> list[Callable[..., object]]:
                     return None
 
     tools.extend([search_users, search_notes])
+
+    # Social credit score tools (Redis-based)
+    if redis_client:
+        # Capture redis_client in closure with type assertion
+        _redis: Redis = redis_client
+
+        def _normalize_username(username: str) -> str:
+            """Normalize username to lowercase, strip @ prefix."""
+            username = username.strip().lower()
+            if username.startswith("@"):
+                username = username[1:]
+            return username
+
+        async def get_social_credit(username: str) -> str:
+            """Get a user's social credit score.
+
+            Args:
+                username: The username to look up (e.g. 'alice' for local, 'bob@remote.host' for remote).
+            """
+            username = _normalize_username(username)
+            with logfire.span("get social credit", username=username):
+                try:
+                    score = await _redis.get(f"score:{username}")
+                    if score is None:
+                        return f"User @{username} has no social credit score yet (defaults to 0)."
+                    return f"User @{username} has {score} social credit points."
+                except Exception:
+                    logfire.exception("Error getting social credit score")
+                    return "Error retrieving social credit score."
+
+        async def adjust_social_credit(username: str, amount: int, reason: str) -> str:
+            """Adjust a user's social credit score.
+
+            Args:
+                username: The username to adjust (e.g. 'alice' for local, 'bob@remote.host' for remote).
+                amount: The amount to add (positive) or subtract (negative).
+                reason: A brief explanation for the adjustment (required).
+            """
+            username = _normalize_username(username)
+            with logfire.span(
+                "adjust social credit",
+                username=username,
+                amount=amount,
+                reason=reason,
+            ):
+                try:
+                    if not reason or not reason.strip():
+                        return "Error: reason is required for social credit adjustments."
+
+                    # Increment score
+                    new_score = await _redis.incrby(f"score:{username}", amount)
+
+                    # Log change to history
+                    history_entry = json.dumps({
+                        "amount": amount,
+                        "reason": reason,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                    await _redis.lpush(f"history:{username}", history_entry)  # type: ignore[arg-type]
+
+                    # Update leaderboard (sorted set)
+                    await _redis.zadd("global:leaderboard", {username: float(new_score)})
+
+                    sign = "+" if amount >= 0 else ""
+                    return f"Adjusted @{username}'s social credit by {sign}{amount}. New score: {new_score}. Reason: {reason}"
+                except Exception:
+                    logfire.exception("Error adjusting social credit score")
+                    return "Error adjusting social credit score."
+
+        async def get_social_credit_history(username: str, limit: int = 10) -> str:
+            """Get the history of social credit score changes for a user.
+
+            Args:
+                username: The username to look up (e.g. 'alice' for local, 'bob@remote.host' for remote).
+                limit: Maximum number of history entries to return (default 10).
+            """
+            username = _normalize_username(username)
+            with logfire.span(
+                "get social credit history",
+                username=username,
+                limit=limit,
+            ):
+                try:
+                    limit = max(1, min(50, limit))  # Clamp to 1-50
+
+                    # Get recent history entries
+                    entries = await _redis.lrange(f"history:{username}", 0, limit - 1)  # type: ignore[arg-type]
+
+                    if not entries:
+                        return f"No social credit history found for @{username}."
+
+                    results = []
+                    for entry in entries:
+                        data = json.loads(entry)
+                        amount = data.get("amount", 0)
+                        reason = data.get("reason", "No reason")
+                        timestamp = data.get("timestamp", "Unknown time")
+                        sign = "+" if amount >= 0 else ""
+                        results.append(f"{timestamp}: {sign}{amount} - {reason}")
+
+                    return f"Social credit history for @{username}:\n" + "\n".join(results)
+                except Exception:
+                    logfire.exception("Error getting social credit history")
+                    return "Error retrieving social credit history."
+
+        async def get_social_credit_leaderboard(limit: int = 10) -> str:
+            """Get the top users by social credit score.
+
+            Args:
+                limit: Number of top users to return (default 10, max 50).
+            """
+            with logfire.span("get social credit leaderboard", limit=limit):
+                try:
+                    limit = max(1, min(50, limit))
+
+                    # Get top scores (descending order)
+                    top_users = await _redis.zrevrange(
+                        "global:leaderboard",
+                        0,
+                        limit - 1,
+                        withscores=True,
+                    )
+
+                    if not top_users:
+                        return "No social credit scores recorded yet."
+
+                    results = []
+                    for rank, (username, score) in enumerate(top_users, 1):
+                        results.append(f"{rank}. @{username}: {int(score)} points")
+
+                    return "Social Credit Leaderboard:\n" + "\n".join(results)
+                except Exception:
+                    logfire.exception("Error getting social credit leaderboard")
+                    return "Error retrieving leaderboard."
+
+        tools.extend([
+            get_social_credit,
+            adjust_social_credit,
+            get_social_credit_history,
+            get_social_credit_leaderboard,
+        ])
+
     return tools
