@@ -256,6 +256,10 @@ When modifying this codebase:
 4. Update this guide for architectural changes
 5. Test with multiple LLM providers
 6. Consider token costs in implementations
+7. **Verify all edits pass checks** — after making changes, always:
+   - Check for IDE/compiler errors and diagnostics on modified files
+   - If IDE diagnostics are unavailable, run `uv run ruff check bot/` for linting and `uv run ruff format --check bot/` for formatting
+   - Fix any issues before considering the task complete
 
 ## Troubleshooting
 

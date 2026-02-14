@@ -1,8 +1,12 @@
 import asyncio
+from dataclasses import dataclass
 from typing import Optional
 
+import httpx
+
 from pydantic import BaseModel
-from pydantic_ai import Agent, ImageUrl
+from pydantic_ai import Agent, ImageUrl, RunContext
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.fallback import FallbackModel
 import logfire
 from redis.asyncio import Redis
@@ -16,8 +20,16 @@ class ReplyOutput(BaseModel):
 
     reply: str
     """Reply to the message. Must NOT include mentions or usernames. Must not be None."""
-    mentions: Optional[list[str]] = None
-    """List of usernames mentioned in the message (without @ prefix)."""
+
+
+@dataclass
+class AgentDeps:
+    """Runtime dependencies passed to the agent on each run."""
+
+    username: str
+    """The handle of the user who sent the message."""
+    social_credit_score: Optional[int] = None
+    """The user's current social credit score, or None if unavailable."""
 
 
 class ChatAgent:
@@ -25,31 +37,41 @@ class ChatAgent:
         self._config = config
         self._redis = redis_client
 
+        fallback_on = (ModelAPIError, httpx.TimeoutException)
+
         # Create fallback model from all configured models
         if len(config.llm_models) == 1:
             model = config.llm_models[0]
         else:
-            model = FallbackModel(*config.llm_models)
+            model = FallbackModel(*config.llm_models, fallback_on=fallback_on)
 
         # Create vision fallback model
         if len(config.vision_models) == 1:
             self._vision_model = config.vision_models[0]
         else:
-            self._vision_model = FallbackModel(*config.vision_models)
+            self._vision_model = FallbackModel(*config.vision_models, fallback_on=fallback_on)
 
         tools = build_tools(config, redis_client=redis_client)
 
-        self._agent: Agent[None, ReplyOutput] = Agent(
+        async def _inject_social_credit(ctx: RunContext[AgentDeps]) -> str:
+            parts: list[str] = []
+            parts.append(f"Current user: @{ctx.deps.username}")
+            if ctx.deps.social_credit_score is not None:
+                parts.append(f"Current user's social credit score: {ctx.deps.social_credit_score}")
+            else:
+                parts.append("Current user's social credit score: 0 (no score recorded yet)")
+            return "\n".join(parts)
+
+        self._agent: Agent[AgentDeps, ReplyOutput] = Agent(
             model,
             output_type=ReplyOutput,
-            instructions=config.system_prompt,
+            deps_type=AgentDeps,
+            instructions=[config.system_prompt, _inject_social_credit],
             tools=tools,
             retries=3,
         )
 
-    async def run(
-        self, note: Note, context: Optional[list[Note]] = None
-    ) -> ReplyOutput:
+    async def run(self, note: Note, context: Optional[list[Note]] = None) -> ReplyOutput:
         """Process a note and generate a reply."""
         if not note.text:
             raise ValueError("Note text is empty")
@@ -97,18 +119,38 @@ class ChatAgent:
         base_prompt_parts.append("Current message:\n" + user_prompt)
         base_prompt = "\n\n".join(base_prompt_parts)
 
-        result = await self._agent.run(base_prompt)
+        # Pre-fetch social credit score for the current user
+        handle = _user_handle(note.user)
+        score = await self._get_social_credit_score(handle)
+        deps = AgentDeps(username=handle, social_credit_score=score)
+
+        result = await self._agent.run(base_prompt, deps=deps, model_settings={"timeout": 300.0})
         logfire.info(f"Reply: {result.output}")
         return result.output
+
+    async def _get_social_credit_score(self, username: str) -> Optional[int]:
+        """Fetch the user's social credit score from Redis."""
+        if not self._redis:
+            return None
+        # Normalize: lowercase, strip @
+        key = username.strip().lower()
+        if key.startswith("@"):
+            key = key[1:]
+        try:
+            raw = await self._redis.get(f"score:{key}")
+            if raw is None:
+                return None
+            return int(raw)
+        except Exception:
+            logfire.exception("Error pre-fetching social credit score")
+            return None
 
     async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
         """Describe images using vision models."""
         with logfire.span("describe images", file_count=len(files)):
             image_urls: list[str] = []
             for f in files:
-                logfire.info(
-                    f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}"
-                )
+                logfire.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
                 if f.thumbnailUrl and f.type.startswith("image/"):
                     image_urls.append(f.thumbnailUrl)
 
@@ -128,7 +170,7 @@ class ChatAgent:
                 for url in image_urls:
                     prompt.append(ImageUrl(url=url))
 
-                result = await vision_agent.run(prompt)
+                result = await vision_agent.run(prompt, model_settings={"timeout": 300.0})
                 descriptions = [result.output]
                 logfire.info(f"Image descriptions: {descriptions}")
                 return descriptions
