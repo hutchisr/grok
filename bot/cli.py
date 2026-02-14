@@ -17,6 +17,7 @@ from .api import api_client
 def main(config):
     asyncio.run(main_async(config))
 
+
 async def main_async(config):
     loop = asyncio.get_running_loop()
 
@@ -30,7 +31,6 @@ async def main_async(config):
         console=logfire.ConsoleOptions(min_log_level=min_level, verbose=debug_enabled),
     )
     logfire.instrument_pydantic_ai()
-
 
     # Configure global HTTP client with config settings
     api_client.configure(config)

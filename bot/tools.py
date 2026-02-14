@@ -47,12 +47,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                         )
                         response.raise_for_status()
                         data = response.json()
-                        return "\n---\n".join(
-                            [
-                                result.get("content")
-                                for result in data.get("results", [])[:5]
-                            ]
-                        )
+                        return "\n---\n".join([result.get("content") for result in data.get("results", [])[:5]])
                     except httpx.HTTPError:
                         logfire.exception("HTTP Error during web search")
                         return None
@@ -125,9 +120,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     response.raise_for_status()
                     created = response.json().get("createdNote", {})
                     note_id = created.get("id")
-                    return (
-                        f"Created note {note_id}." if note_id else "Note created."
-                    )
+                    return f"Created note {note_id}." if note_id else "Note created."
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 400:
                         text_len = len(f"{mention_prefix}{text}")
@@ -269,11 +262,13 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     new_score = await _redis.incrby(f"score:{username}", amount)
 
                     # Log change to history
-                    history_entry = json.dumps({
-                        "amount": amount,
-                        "reason": reason,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    history_entry = json.dumps(
+                        {
+                            "amount": amount,
+                            "reason": reason,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
                     await _redis.lpush(f"history:{username}", history_entry)  # type: ignore[arg-type]
 
                     # Update leaderboard (sorted set)
@@ -351,11 +346,13 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     logfire.exception("Error getting social credit leaderboard")
                     return "Error retrieving leaderboard."
 
-        tools.extend([
-            get_social_credit,
-            adjust_social_credit,
-            get_social_credit_history,
-            get_social_credit_leaderboard,
-        ])
+        tools.extend(
+            [
+                get_social_credit,
+                adjust_social_credit,
+                get_social_credit_history,
+                get_social_credit_leaderboard,
+            ]
+        )
 
     return tools

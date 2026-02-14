@@ -19,9 +19,7 @@ class ApiClient:
             if self.__async_client is None:
                 if self.__config:
                     self.__async_client = httpx.AsyncClient(
-                        transport=httpx.AsyncHTTPTransport(
-                            retries=self.__config.max_retries
-                        ),
+                        transport=httpx.AsyncHTTPTransport(retries=self.__config.max_retries),
                         headers={"Authorization": f"Bearer {self.__config.token}"},
                     )
                 else:
@@ -32,11 +30,7 @@ class ApiClient:
     def configure(self, config: Config) -> None:
         with self.__lock:
             self.__config = config
-            old_client = (
-                self.__async_client
-                if self.__async_client and not self.__async_client.is_closed
-                else None
-            )
+            old_client = self.__async_client if self.__async_client and not self.__async_client.is_closed else None
             if old_client:
                 self.__async_client = None
 
@@ -69,5 +63,7 @@ class ApiClient:
 api_client = ApiClient()
 
 if TYPE_CHECKING:
+
     class ApiAsyncClient(ApiClient, httpx.AsyncClient): ...
+
     api_client = cast(ApiAsyncClient, api_client)

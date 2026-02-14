@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, AnyHttpUrl, WebsocketUrl
+from pydantic import BaseModel, Field, AnyHttpUrl, WebsocketUrl, model_validator
 from typing import List, Optional, Literal
 
 
@@ -13,13 +13,16 @@ class User(BaseModel):
     class Config:
         extra = "allow"
 
+
 class MiFile(BaseModel):
     id: str
     type: str
     thumbnailUrl: Optional[str] = None
     url: Optional[str] = None
+
     class Config:
         extra = "allow"
+
 
 class Note(BaseModel):
     id: str
@@ -28,8 +31,8 @@ class Note(BaseModel):
     user: User
     replyId: Optional[str] = None
     renoteId: Optional[str] = None
-    reply: Optional['Note'] = None
-    renote: Optional['Note'] = None
+    reply: Optional["Note"] = None
+    renote: Optional["Note"] = None
     visibility: Literal["public", "home", "followers", "specified"]
     mentions: Optional[List[str]] = None
     files: Optional[List[MiFile]]
@@ -63,8 +66,23 @@ class Config(BaseModel):
     bot_user_id: str = Field(description="bot_user_id")
     bot_username: str = Field(description="bot_username")
     system_prompt: str = Field(description="system_prompt")
-    system_prompt_auto: str = Field(description="system_prompt_auto")
+    system_prompt_auto: Optional[str] = Field(
+        default=None,
+        description="System prompt for autonomous (unprompted) posts",
+    )
+    auto_post_interval: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Interval in seconds between autonomous posts (None = disabled)",
+    )
     max_retries: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def check_auto_post_config(self) -> "Config":
+        if self.auto_post_interval and not self.system_prompt_auto:
+            raise ValueError("system_prompt_auto is required when auto_post_interval is set")
+        return self
+
     http_timeout_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -73,18 +91,8 @@ class Config(BaseModel):
     searxng_url: Optional[AnyHttpUrl] = None
     searxng_user: Optional[str] = None
     searxng_password: Optional[str] = None
-    redis_url: Optional[str] = Field(
-        default=None,
-        description="Redis connection URL (redis://host:port/db)"
-    )
-    redis_password: Optional[str] = Field(
-        default=None,
-        description="Redis password for authentication"
-    )
-    redis_db: Optional[int] = Field(
-        default=0,
-        ge=0,
-        description="Redis database number (0-15)"
-    )
+    redis_url: Optional[str] = Field(default=None, description="Redis connection URL (redis://host:port/db)")
+    redis_password: Optional[str] = Field(default=None, description="Redis password for authentication")
+    redis_db: Optional[int] = Field(default=0, ge=0, description="Redis database number (0-15)")
     max_context: int = Field(gt=0, default=1, description="Number of context messages to include")
     debug: Optional[bool] = None

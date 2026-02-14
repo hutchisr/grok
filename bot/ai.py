@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -71,6 +71,16 @@ class ChatAgent:
             retries=3,
         )
 
+        self._auto_agent: Optional[Agent[Any, ReplyOutput]] = None
+        if config.system_prompt_auto:
+            self._auto_agent = Agent(
+                model,
+                output_type=ReplyOutput,
+                instructions=[config.system_prompt_auto],
+                tools=tools,
+                retries=3,
+            )
+
     async def run(self, note: Note, context: Optional[list[Note]] = None) -> ReplyOutput:
         """Process a note and generate a reply."""
         if not note.text:
@@ -126,6 +136,17 @@ class ChatAgent:
 
         result = await self._agent.run(base_prompt, deps=deps, model_settings={"timeout": 300.0})
         logfire.info(f"Reply: {result.output}")
+        return result.output
+
+    async def run_auto(self) -> ReplyOutput:
+        """Generate an autonomous post with no user input."""
+        if not self._auto_agent:
+            raise ValueError("No system_prompt_auto configured")
+        result = await self._auto_agent.run(
+            "Generate a post for the timeline.",
+            model_settings={"timeout": 300.0},
+        )
+        logfire.info(f"Autonomous post: {result.output}")
         return result.output
 
     async def _get_social_credit_score(self, username: str) -> Optional[int]:

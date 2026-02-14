@@ -50,9 +50,7 @@ class Bot:
             if not note.text:
                 logfire.debug(f"Empty note? {note}")
                 return
-            logfire.info(
-                f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`"
-            )
+            logfire.info(f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`")
             context: Optional[list[Note]] = []
             if note.replyId:
                 reply_id = note.replyId
@@ -83,7 +81,7 @@ class Bot:
         mentions = await self._build_mentions_from_note(in_reply_to)
 
         payload = {
-            "text": f"{' '.join(mentions)}\n{self._strip_leading_mentions(output.reply or "")}",
+            "text": f"{' '.join(mentions)}\n{self._strip_leading_mentions(output.reply or '')}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:
@@ -166,8 +164,46 @@ class Bot:
         )
         return note
 
+    async def post_autonomous(self):
+        """Generate and post an autonomous note to the timeline."""
+        with logfire.span("autonomous post"):
+            result = await self._agent.run_auto()
+            response = await api_client.post(
+                f"{self.url}api/notes/create",
+                json={"text": result.reply, "visibility": "public"},
+            )
+            response.raise_for_status()
+            note_id = response.json().get("createdNote", {}).get("id")
+            logfire.info(f"Posted autonomous note: {note_id}")
+
+    async def _auto_post_loop(self):
+        """Periodically post autonomous notes at the configured interval."""
+        interval = self._config.auto_post_interval
+        assert interval is not None
+        logfire.info(f"Starting autonomous post loop (interval: {interval}s)")
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=float(interval),
+                )
+                break  # shutdown event fired
+            except asyncio.TimeoutError:
+                pass
+            if self._shutdown_event.is_set():
+                break
+            try:
+                await self.post_autonomous()
+            except Exception:
+                logfire.exception("Error during autonomous post")
+
     async def run(self):
         logfire.info("Connecting to WebSocket...")
+
+        auto_post_task: Optional[asyncio.Task] = None
+        if self._config.auto_post_interval:
+            auto_post_task = asyncio.create_task(self._auto_post_loop())
+
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
                 with logfire.span("connect websocket"):
@@ -184,7 +220,7 @@ class Bot:
                 shutdown_task = asyncio.create_task(self._shutdown_event.wait())
                 message_task = asyncio.create_task(self._handle_messages(websocket))
 
-                done, pending = await asyncio.wait(
+                done, _ = await asyncio.wait(
                     [shutdown_task, message_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -192,10 +228,14 @@ class Bot:
                 if shutdown_task in done:
                     logfire.info("Shutdown requested, closing connection")
                     await websocket.close()
+                    if auto_post_task:
+                        auto_post_task.cancel()
                     return
 
             except ConnectionClosed:
                 if self._shutdown_event.is_set():
+                    if auto_post_task:
+                        auto_post_task.cancel()
                     return
                 logfire.warning("WebSocket connection closed, reconnecting...")
                 continue
@@ -210,9 +250,7 @@ class Bot:
                         task = asyncio.create_task(self.on_mention(msg.body.body))
                         task.add_done_callback(self._task_done_callback)
             except ValidationError as e:
-                logfire.debug(
-                    f"Validation error: {e}. Message doesn't match expected format, ignoring."
-                )
+                logfire.debug(f"Validation error: {e}. Message doesn't match expected format, ignoring.")
                 pass
             except asyncio.CancelledError:
                 logfire.info("Message handler cancelled")
@@ -238,7 +276,6 @@ class Bot:
         if user.host:
             handle += f"@{user.host}"
         return handle
-
 
     def _unique_ordered(self, values: list[str]) -> list[str]:
         seen: set[str] = set()
