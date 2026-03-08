@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 
@@ -11,7 +11,7 @@ from pydantic_ai.models.fallback import FallbackModel
 import logfire
 from redis.asyncio import Redis
 
-from .models import Config, Note, MiFile
+from .models import Config, Note
 from .tools import build_tools
 
 
@@ -44,12 +44,6 @@ class ChatAgent:
             model = config.llm_models[0]
         else:
             model = FallbackModel(*config.llm_models, fallback_on=fallback_on)
-
-        # Create vision fallback model
-        if len(config.vision_models) == 1:
-            self._vision_model = config.vision_models[0]
-        else:
-            self._vision_model = FallbackModel(*config.vision_models, fallback_on=fallback_on)
 
         tools = build_tools(config, redis_client=redis_client)
 
@@ -86,55 +80,60 @@ class ChatAgent:
         if not note.text:
             raise ValueError("Note text is empty")
 
-        # Collect files from context and current note
-        files: list[MiFile] = []
-        if context:
-            for n in context:
-                if n.files:
-                    files.extend(n.files)
-        if note.files:
-            files.extend(note.files)
-
-        # Describe images if present
-        descriptions = None
-        if files:
-            descriptions = await self.describe_images(files)
-
         def _user_handle(user) -> str:
             """Get full handle: username for local, username@host for remote."""
             if user.host:
                 return f"{user.username}@{user.host}"
             return user.username
 
-        # Build the current prompt
-        prompt_parts = []
-        if descriptions:
-            prompt_parts.append(f"Image descriptions: {', '.join(descriptions)}")
-        if note.user.location:
-            prompt_parts.append(f"User location: {note.user.location}")
-        prompt_parts.append(f"{_user_handle(note.user)}: {note.text}")
+        vision = self._config.vision
 
-        user_prompt = "\n".join(prompt_parts)
+        def _image_urls_for(n: Note) -> list[ImageUrl]:
+            """Extract ImageUrl objects for a note's image attachments."""
+            if not vision or not n.files:
+                return []
+            return [ImageUrl(url=f.thumbnailUrl) for f in n.files if f.thumbnailUrl and f.type.startswith("image/")]
 
-        # Build context text
-        context_lines: list[str] = []
+        # Build prompt parts, interleaving each note's text with its images
+        has_images = False
+        prompt_items: list[str | ImageUrl] = []
+
+        # Context notes (oldest first)
         if context:
+            prompt_items.append("Conversation so far:")
             for c in reversed(context):
                 if c.text:
-                    context_lines.append(f"{_user_handle(c.user)}: {c.text}")
+                    prompt_items.append(f"{_user_handle(c.user)}: {c.text}")
+                images = _image_urls_for(c)
+                if images:
+                    has_images = True
+                    prompt_items.extend(images)
 
-        base_prompt_parts: list[str] = []
-        if context_lines:
-            base_prompt_parts.append("Conversation so far:\n" + "\n".join(context_lines))
-        base_prompt_parts.append("Current message:\n" + user_prompt)
-        base_prompt = "\n\n".join(base_prompt_parts)
+        # Current message
+        current_parts: list[str] = []
+        if note.user.location:
+            current_parts.append(f"User location: {note.user.location}")
+        current_parts.append(f"{_user_handle(note.user)}: {note.text}")
+        prompt_items.append("Current message:\n" + "\n".join(current_parts))
+
+        current_images = _image_urls_for(note)
+        if current_images:
+            has_images = True
+            prompt_items.extend(current_images)
+
+        # Use a plain string when there are no images, multimodal list otherwise
+        prompt: str | list[str | ImageUrl]
+        if has_images:
+            prompt = prompt_items
+        else:
+            prompt = "\n\n".join(cast(list[str], prompt_items))
 
         # Pre-fetch social credit score for the current user
         handle = _user_handle(note.user)
         score = await self._get_social_credit_score(handle)
         deps = AgentDeps(username=handle, social_credit_score=score)
 
-        result = await self._agent.run(base_prompt, deps=deps, model_settings={"timeout": 300.0})
+        result = await self._agent.run(prompt, deps=deps, model_settings={"timeout": 300.0})
         logfire.info(f"Reply: {result.output}")
         return result.output
 
@@ -165,40 +164,6 @@ class ChatAgent:
         except Exception:
             logfire.exception("Error pre-fetching social credit score")
             return None
-
-    async def describe_images(self, files: list[MiFile]) -> Optional[list[str]]:
-        """Describe images using vision models."""
-        with logfire.span("describe images", file_count=len(files)):
-            image_urls: list[str] = []
-            for f in files:
-                logfire.info(f"Looking at file: {f.id} ({f.type}): {f.thumbnailUrl}")
-                if f.thumbnailUrl and f.type.startswith("image/"):
-                    image_urls.append(f.thumbnailUrl)
-
-            if not image_urls:
-                return None
-
-            # Use vision model with fallback
-            try:
-                vision_agent: Agent[None, str] = Agent(
-                    self._vision_model,
-                    output_type=str,
-                    instructions="Describe the images provided in a concise way.",
-                )
-
-                # Build prompt with ImageUrl objects for proper multimodal input
-                prompt: list[str | ImageUrl] = ["Describe these images:"]
-                for url in image_urls:
-                    prompt.append(ImageUrl(url=url))
-
-                result = await vision_agent.run(prompt, model_settings={"timeout": 300.0})
-                descriptions = [result.output]
-                logfire.info(f"Image descriptions: {descriptions}")
-                return descriptions
-
-            except Exception:
-                logfire.exception("Error occurred while describing images")
-                return None
 
     def run_sync(self, *args, **kwargs) -> ReplyOutput:
         """Sync wrapper for run - for compatibility with notebooks."""

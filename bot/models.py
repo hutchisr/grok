@@ -61,7 +61,10 @@ class Config(BaseModel):
     token: str = Field(description="token")
     channel: Optional[str] = None
     llm_models: List[str] = Field(description="LLM model strings (e.g., 'openrouter:anthropic/claude-3.5-sonnet')")
-    vision_models: List[str] = Field(description="Vision model strings")
+    vision: bool = Field(default=True, description="Enable vision (pass images directly to the main LLM)")
+    vision_models: Optional[List[str]] = Field(
+        default=None, description="Vision model strings (legacy, unused when vision=True)"
+    )
     max_tokens: int = Field(gt=0)
     bot_user_id: str = Field(description="bot_user_id")
     bot_username: str = Field(description="bot_username")
