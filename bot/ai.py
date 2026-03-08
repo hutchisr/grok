@@ -1,18 +1,48 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 import httpx
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, ImageUrl, RunContext
 from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.fallback import FallbackModel
 import logfire
 from redis.asyncio import Redis
 
-from .models import Config, Note
+from .models import Config, Note, User
 from .tools import build_tools
+
+
+def _user_handle(user: User) -> str:
+    """Get full handle: username for local, username@host for remote."""
+    if user.host:
+        return f"{user.username}@{user.host}"
+    return user.username
+
+
+def _image_urls_for(note: Note, vision: bool) -> list[ImageUrl]:
+    """Extract ImageUrl objects for a note's image attachments."""
+    if not vision or not note.files:
+        return []
+    return [ImageUrl(url=f.thumbnailUrl) for f in note.files if f.thumbnailUrl and f.type.startswith("image/")]
+
+
+def _build_user_content(note: Note, vision: bool) -> str | list[str | ImageUrl]:
+    """Build content for a user prompt part, with optional images."""
+    text = f"{_user_handle(note.user)}: {note.text or ''}"
+    images = _image_urls_for(note, vision)
+    if images:
+        return [text, *images]
+    return text
 
 
 class ReplyOutput(BaseModel):
@@ -80,60 +110,43 @@ class ChatAgent:
         if not note.text:
             raise ValueError("Note text is empty")
 
-        def _user_handle(user) -> str:
-            """Get full handle: username for local, username@host for remote."""
-            if user.host:
-                return f"{user.username}@{user.host}"
-            return user.username
-
+        bot_user_id = self._config.bot_user_id
         vision = self._config.vision
 
-        def _image_urls_for(n: Note) -> list[ImageUrl]:
-            """Extract ImageUrl objects for a note's image attachments."""
-            if not vision or not n.files:
-                return []
-            return [ImageUrl(url=f.thumbnailUrl) for f in n.files if f.thumbnailUrl and f.type.startswith("image/")]
-
-        # Build prompt parts, interleaving each note's text with its images
-        has_images = False
-        prompt_items: list[str | ImageUrl] = []
-
-        # Context notes (oldest first)
+        # Build message history from context notes (oldest first)
+        message_history: list[ModelMessage] = []
         if context:
-            prompt_items.append("Conversation so far:")
             for c in reversed(context):
-                if c.text:
-                    prompt_items.append(f"{_user_handle(c.user)}: {c.text}")
-                images = _image_urls_for(c)
-                if images:
-                    has_images = True
-                    prompt_items.extend(images)
+                if c.userId == bot_user_id:
+                    # Bot's own previous messages become assistant responses
+                    message_history.append(ModelResponse(parts=[TextPart(content=c.text or "")]))
+                else:
+                    # Other users' messages become user prompts (with any attached images)
+                    message_history.append(ModelRequest(parts=[UserPromptPart(content=_build_user_content(c, vision))]))
 
-        # Current message
-        current_parts: list[str] = []
+        # Build current user prompt
+        current_parts: list[str | ImageUrl] = []
         if note.user.location:
             current_parts.append(f"User location: {note.user.location}")
         current_parts.append(f"{_user_handle(note.user)}: {note.text}")
-        prompt_items.append("Current message:\n" + "\n".join(current_parts))
-
-        current_images = _image_urls_for(note)
+        current_images = _image_urls_for(note, vision)
         if current_images:
-            has_images = True
-            prompt_items.extend(current_images)
+            current_parts.extend(current_images)
 
-        # Use a plain string when there are no images, multimodal list otherwise
         prompt: str | list[str | ImageUrl]
-        if has_images:
-            prompt = prompt_items
+        if len(current_parts) == 1 and isinstance(current_parts[0], str):
+            prompt = current_parts[0]
         else:
-            prompt = "\n\n".join(cast(list[str], prompt_items))
+            prompt = current_parts
 
         # Pre-fetch social credit score for the current user
         handle = _user_handle(note.user)
         score = await self._get_social_credit_score(handle)
         deps = AgentDeps(username=handle, social_credit_score=score)
 
-        result = await self._agent.run(prompt, deps=deps, model_settings={"timeout": 300.0})
+        result = await self._agent.run(
+            prompt, deps=deps, message_history=message_history, model_settings={"timeout": 300.0}
+        )
         logfire.info(f"Reply: {result.output}")
         return result.output
 
