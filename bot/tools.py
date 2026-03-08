@@ -7,6 +7,7 @@ from typing import Optional
 
 import httpx
 import logfire
+from pydantic_ai import RunContext
 from redis.asyncio import Redis
 
 from .models import Config
@@ -239,15 +240,23 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     logfire.exception("Error getting social credit score")
                     return "Error retrieving social credit score."
 
-        async def adjust_social_credit(username: str, amount: int, reason: str) -> str:
+        async def adjust_social_credit(ctx: RunContext[object], username: str, amount: int, reason: str) -> str:
             """Adjust a user's social credit score.
 
             Args:
+                ctx: The run context (injected automatically).
                 username: The username to adjust (e.g. 'alice' for local, 'bob@remote.host' for remote).
                 amount: The amount to add (positive) or subtract (negative).
                 reason: A brief explanation for the adjustment (required).
             """
             username = _normalize_username(username)
+
+            # Prevent multiple adjustments per user per run
+            adjusted = getattr(ctx.deps, "adjusted_credit_users", None)
+            if adjusted is not None:
+                if username in adjusted:
+                    return f"Already adjusted @{username}'s social credit in this interaction. Only one adjustment per user per message is allowed."
+                adjusted.add(username)
             with logfire.span(
                 "adjust social credit",
                 username=username,

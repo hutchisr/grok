@@ -71,6 +71,9 @@ class Bot:
             if note.renote and (note.renote.text or note.renote.files):
                 context.append(note.renote)
             result = await self._agent.run(note=note, context=context)
+            if result.reply.strip() == "NO_REPLY":
+                logfire.info(f"Skipping reply to note {note.id} (NO_REPLY)")
+                return
             await self.send_note(result, in_reply_to=note)
 
     async def send_note(

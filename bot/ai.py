@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
@@ -49,7 +49,7 @@ class ReplyOutput(BaseModel):
     """Output schema for the chat agent."""
 
     reply: str
-    """Reply to the message. Must NOT include mentions or usernames. Must not be None."""
+    """Reply to the message. Must NOT include mentions or usernames. Must not be None. Set to exactly 'NO_REPLY' if you choose not to respond."""
 
 
 @dataclass
@@ -60,6 +60,8 @@ class AgentDeps:
     """The handle of the user who sent the message."""
     social_credit_score: Optional[int] = None
     """The user's current social credit score, or None if unavailable."""
+    adjusted_credit_users: set[str] = field(default_factory=set)
+    """Tracks users whose social credit was already adjusted in this run."""
 
 
 class ChatAgent:
