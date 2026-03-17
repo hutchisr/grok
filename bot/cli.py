@@ -28,7 +28,11 @@ async def main_async(config):
     min_level = "debug" if debug_enabled else "info"
     logfire.configure(
         min_level=min_level,
-        console=logfire.ConsoleOptions(min_log_level=min_level, verbose=debug_enabled),
+        console=logfire.ConsoleOptions(
+            min_log_level=min_level,
+            verbose=debug_enabled,
+            include_timestamps=True,
+        ),
     )
     logfire.instrument_pydantic_ai()
 
@@ -52,13 +56,14 @@ async def main_async(config):
     )
 
     def shutdown_handler():
-        bot.shutdown()
-        logfire.info("Shut down bot")
-        loop.create_task(api_client.close())
-        logfire.info("Closed API client")
-        if redis_client:
-            loop.create_task(redis_client.aclose())
-            logfire.info("Closed Redis client")
+        with logfire.span("Shutting down"):
+            bot.shutdown()
+            logfire.info("Shut down bot")
+            loop.create_task(api_client.close())
+            logfire.info("Closed API client")
+            if redis_client:
+                loop.create_task(redis_client.aclose())
+                logfire.info("Closed Redis client")
 
     loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
     loop.add_signal_handler(signal.SIGINT, shutdown_handler)

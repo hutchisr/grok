@@ -43,7 +43,7 @@ class Note(BaseModel):
 
 
 class MiWebsocketMessageBody(BaseModel):
-    type: Optional[str] = None
+    type: Optional[str] = None  # usually `mention` or `note`
     body: Optional[Note] = None
     channel: Optional[str] = None
     id: Optional[str] = None
@@ -77,6 +77,11 @@ class Config(BaseModel):
         default=None,
         gt=0,
         description="Interval in seconds between autonomous posts (None = disabled)",
+    )
+    auto_post_jitter: int = Field(
+        default=0,
+        ge=0,
+        description="Random jitter in seconds added/subtracted from auto_post_interval",
     )
     max_retries: int = Field(gt=0)
 

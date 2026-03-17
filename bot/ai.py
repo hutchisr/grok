@@ -4,7 +4,6 @@ from typing import Any, Optional
 
 import httpx
 
-from pydantic import BaseModel
 from pydantic_ai import Agent, ImageUrl, RunContext
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import (
@@ -45,13 +44,6 @@ def _build_user_content(note: Note, vision: bool) -> str | list[str | ImageUrl]:
     return text
 
 
-class ReplyOutput(BaseModel):
-    """Output schema for the chat agent."""
-
-    reply: str
-    """Reply to the message. Must NOT include mentions or usernames. Must not be None. Set to exactly 'NO_REPLY' if you choose not to respond."""
-
-
 @dataclass
 class AgentDeps:
     """Runtime dependencies passed to the agent on each run."""
@@ -88,26 +80,26 @@ class ChatAgent:
                 parts.append("Current user's social credit score: 0 (no score recorded yet)")
             return "\n".join(parts)
 
-        self._agent: Agent[AgentDeps, ReplyOutput] = Agent(
+        self._agent: Agent[AgentDeps, str] = Agent(
             model,
-            output_type=ReplyOutput,
+            output_type=str,
             deps_type=AgentDeps,
             instructions=[config.system_prompt, _inject_social_credit],
             tools=tools,
             retries=3,
         )
 
-        self._auto_agent: Optional[Agent[Any, ReplyOutput]] = None
+        self._auto_agent: Optional[Agent[Any, str]] = None
         if config.system_prompt_auto:
             self._auto_agent = Agent(
                 model,
-                output_type=ReplyOutput,
+                output_type=str,
                 instructions=[config.system_prompt_auto],
                 tools=tools,
                 retries=3,
             )
 
-    async def run(self, note: Note, context: Optional[list[Note]] = None) -> ReplyOutput:
+    async def run(self, note: Note, context: Optional[list[Note]] = None) -> str:
         """Process a note and generate a reply."""
         if not note.text:
             raise ValueError("Note text is empty")
@@ -149,10 +141,9 @@ class ChatAgent:
         result = await self._agent.run(
             prompt, deps=deps, message_history=message_history, model_settings={"timeout": 300.0}
         )
-        logfire.info(f"Reply: {result.output}")
         return result.output
 
-    async def run_auto(self) -> ReplyOutput:
+    async def run_auto(self) -> str:
         """Generate an autonomous post with no user input."""
         if not self._auto_agent:
             raise ValueError("No system_prompt_auto configured")
@@ -180,7 +171,7 @@ class ChatAgent:
             logfire.exception("Error pre-fetching social credit score")
             return None
 
-    def run_sync(self, *args, **kwargs) -> ReplyOutput:
+    def run_sync(self, *args, **kwargs) -> str:
         """Sync wrapper for run - for compatibility with notebooks."""
 
         def _run_async():

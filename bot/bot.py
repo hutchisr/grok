@@ -1,4 +1,5 @@
 import json
+import random
 import re
 
 import asyncio
@@ -10,7 +11,7 @@ from websockets.asyncio.client import connect
 import httpx
 import logfire
 
-from .ai import ChatAgent, ReplyOutput
+from .ai import ChatAgent
 from .models import Config, MiWebsocketMessage, Note, User
 from .api import api_client
 
@@ -36,20 +37,13 @@ class Bot:
         self._shutdown_event = asyncio.Event()
 
     async def on_mention(self, note: Note):
-        with logfire.span(
-            "handle mention",
-            note_id=note.id,
-            user_id=note.user.id,
-            username=note.user.username,
-            has_reply=bool(note.replyId),
-            has_renote=bool(note.renote),
-        ):
-            if note.user.id == self.user_id:
-                logfire.debug("Ignoring own mention")
-                return
-            if not note.text:
-                logfire.debug(f"Empty note? {note}")
-                return
+        if note.user.id == self.user_id:
+            logfire.debug("Ignoring own mention")
+            return
+        if not note.text:
+            logfire.debug(f"Empty note? {note}")
+            return
+        with logfire.span("Fetch context", note_id=note.id, username=note.user.username):
             logfire.info(f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`")
             context: Optional[list[Note]] = []
             if note.replyId:
@@ -70,21 +64,22 @@ class Bot:
                         break
             if note.renote and (note.renote.text or note.renote.files):
                 context.append(note.renote)
-            result = await self._agent.run(note=note, context=context)
-            if result.reply.strip() == "NO_REPLY":
-                logfire.info(f"Skipping reply to note {note.id} (NO_REPLY)")
-                return
+        result = await self._agent.run(note=note, context=context)
+        if result.strip() == "NO_REPLY":
+            logfire.info(f"Skipping reply to note {note.id} (NO_REPLY)")
+            return
+        with logfire.span("Send reply", note_id=note.id):
             await self.send_note(result, in_reply_to=note)
 
     async def send_note(
         self,
-        output: ReplyOutput,
+        output: str,
         in_reply_to: Optional[Note] = None,
     ):
         mentions = await self._build_mentions_from_note(in_reply_to)
 
         payload = {
-            "text": f"{' '.join(mentions)}\n{self._strip_leading_mentions(output.reply or '')}",
+            "text": f"{' '.join(mentions)}\n{self._strip_leading_mentions(output)}",
             "visibility": "public",
         }
         if in_reply_to and in_reply_to.id:
@@ -92,7 +87,7 @@ class Bot:
 
         response = await api_client.post(f"{self.url}api/notes/create", json=payload)
         response.raise_for_status()
-        logfire.info(f"Sent note: {response.json().get('createdNote').get('id')}")
+        logfire.info("Sent note", id=response.json().get("createdNote").get("id"))
 
     async def _build_mentions_from_note(self, note: Optional[Note]) -> list[str]:
         if not note or not note.user:
@@ -173,7 +168,7 @@ class Bot:
             result = await self._agent.run_auto()
             response = await api_client.post(
                 f"{self.url}api/notes/create",
-                json={"text": result.reply, "visibility": "public"},
+                json={"text": result, "visibility": "public"},
             )
             response.raise_for_status()
             note_id = response.json().get("createdNote", {}).get("id")
@@ -182,13 +177,15 @@ class Bot:
     async def _auto_post_loop(self):
         """Periodically post autonomous notes at the configured interval."""
         interval = self._config.auto_post_interval
+        jitter = self._config.auto_post_jitter
         assert interval is not None
-        logfire.info(f"Starting autonomous post loop (interval: {interval}s)")
+        logfire.info(f"Starting autonomous post loop (interval: {interval}s, jitter: ±{jitter}s)")
         while True:
+            delay = interval + random.randint(-jitter, jitter) if jitter else interval
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
-                    timeout=float(interval),
+                    timeout=float(max(delay, 1)),
                 )
                 break  # shutdown event fired
             except asyncio.TimeoutError:
@@ -201,24 +198,21 @@ class Bot:
                 logfire.exception("Error during autonomous post")
 
     async def run(self):
-        logfire.info("Connecting to WebSocket...")
-
         auto_post_task: Optional[asyncio.Task] = None
         if self._config.auto_post_interval:
             auto_post_task = asyncio.create_task(self._auto_post_loop())
 
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
-                with logfire.span("connect websocket"):
-                    await websocket.send(
-                        json.dumps(
-                            {
-                                "type": "connect",
-                                "body": {"channel": "main", "id": "11111"},
-                            }
-                        )
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "connect",
+                            "body": {"channel": "main", "id": "11111"},
+                        }
                     )
-                logfire.info("WebSocket connected")
+                )
+                logfire.info("Connected to websocket")
 
                 shutdown_task = asyncio.create_task(self._shutdown_event.wait())
                 message_task = asyncio.create_task(self._handle_messages(websocket))
@@ -248,10 +242,9 @@ class Bot:
             try:
                 msg = MiWebsocketMessage(**json.loads(message))
                 logfire.debug(f"{msg}")
-                if msg.type == "channel" and msg.body and msg.body.type in {"mention"}:
-                    if msg.body and msg.body.body:
-                        task = asyncio.create_task(self.on_mention(msg.body.body))
-                        task.add_done_callback(self._task_done_callback)
+                if msg.type == "channel" and msg.body and msg.body.body and msg.body.type in {"mention"}:
+                    task = asyncio.create_task(self.on_mention(msg.body.body))
+                    task.add_done_callback(self._task_done_callback)
             except ValidationError as e:
                 logfire.debug(f"Validation error: {e}. Message doesn't match expected format, ignoring.")
                 pass
