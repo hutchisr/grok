@@ -1,6 +1,7 @@
 import json
 import random
 import re
+import time
 
 import asyncio
 from typing import Optional
@@ -12,7 +13,15 @@ import httpx
 import logfire
 
 from .ai import ChatAgent
-from .models import Config, MiWebsocketMessage, Note, User
+from .models import (
+    Config,
+    MiChannelConnect,
+    MiChannelConnectBody,
+    MiChannelConnectParams,
+    MiWebsocketMessage,
+    Note,
+    User,
+)
 from .api import api_client
 
 
@@ -35,6 +44,8 @@ class Bot:
         self._redis = redis_client
         self._agent = ChatAgent(config, redis_client=redis_client)
         self._shutdown_event = asyncio.Event()
+        self._last_auto_reply_time: float = 0.0
+        self._next_auto_reply_delay: float = self._compute_auto_reply_delay()
 
     async def on_mention(self, note: Note):
         if note.user.id == self.user_id:
@@ -162,6 +173,24 @@ class Bot:
         )
         return note
 
+    def _compute_auto_reply_delay(self) -> float:
+        interval = self._config.auto_reply_interval
+        jitter = self._config.auto_reply_jitter
+        return interval + random.randint(-jitter, jitter) if jitter else interval
+
+    async def on_auto_reply(self, note: Note):
+        """Automatically reply to a timeline note if enough time has passed."""
+        now = time.monotonic()
+        elapsed = now - self._last_auto_reply_time
+        if elapsed < self._next_auto_reply_delay:
+            return
+
+        self._last_auto_reply_time = now
+        self._next_auto_reply_delay = self._compute_auto_reply_delay()
+
+        logfire.info("Auto-reply triggered", note=note)
+        await self.on_mention(note)
+
     async def post_autonomous(self):
         """Generate and post an autonomous note to the timeline."""
         with logfire.span("autonomous post"):
@@ -205,14 +234,21 @@ class Bot:
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
                 await websocket.send(
-                    json.dumps(
-                        {
-                            "type": "connect",
-                            "body": {"channel": "main", "id": "11111"},
-                        }
-                    )
+                    MiChannelConnect(body=MiChannelConnectBody(channel="main", id="1")).model_dump_json()
                 )
-                logfire.info("Connected to websocket")
+                if self._config.auto_reply_enabled:
+                    await websocket.send(
+                        MiChannelConnect(
+                            body=MiChannelConnectBody(
+                                channel="globalTimeline",
+                                id="2",
+                                params=MiChannelConnectParams(),
+                            )
+                        ).model_dump_json(exclude_none=True)
+                    )
+                    logfire.info("Connected to websocket (main + globalTimeline)")
+                else:
+                    logfire.info("Connected to websocket (main)")
 
                 shutdown_task = asyncio.create_task(self._shutdown_event.wait())
                 message_task = asyncio.create_task(self._handle_messages(websocket))
@@ -242,9 +278,13 @@ class Bot:
             try:
                 msg = MiWebsocketMessage(**json.loads(message))
                 logfire.debug(f"{msg}")
-                if msg.type == "channel" and msg.body and msg.body.body and msg.body.type in {"mention"}:
-                    task = asyncio.create_task(self.on_mention(msg.body.body))
-                    task.add_done_callback(self._task_done_callback)
+                if msg.type == "channel" and msg.body and msg.body.body:
+                    if msg.body.type == "mention":
+                        task = asyncio.create_task(self.on_mention(msg.body.body))
+                        task.add_done_callback(self._task_done_callback)
+                    elif msg.body.type == "note" and self._config.auto_reply_enabled:
+                        task = asyncio.create_task(self.on_auto_reply(msg.body.body))
+                        task.add_done_callback(self._task_done_callback)
             except ValidationError as e:
                 logfire.debug(f"Validation error: {e}. Message doesn't match expected format, ignoring.")
                 pass

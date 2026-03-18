@@ -42,6 +42,21 @@ class Note(BaseModel):
         extra = "allow"
 
 
+class MiChannelConnectParams(BaseModel):
+    withRenotes: bool = True
+
+
+class MiChannelConnectBody(BaseModel):
+    channel: str
+    id: str
+    params: Optional[MiChannelConnectParams] = None
+
+
+class MiChannelConnect(BaseModel):
+    type: Literal["connect"] = "connect"
+    body: MiChannelConnectBody
+
+
 class MiWebsocketMessageBody(BaseModel):
     type: Optional[str] = None  # usually `mention` or `note`
     body: Optional[Note] = None
@@ -82,6 +97,20 @@ class Config(BaseModel):
         default=0,
         ge=0,
         description="Random jitter in seconds added/subtracted from auto_post_interval",
+    )
+    auto_reply_enabled: bool = Field(
+        default=False,
+        description="Enable automatic replies to timeline notes",
+    )
+    auto_reply_interval: int = Field(
+        default=900,
+        gt=0,
+        description="Minimum seconds between automatic replies",
+    )
+    auto_reply_jitter: int = Field(
+        default=0,
+        ge=0,
+        description="Random jitter in seconds added/subtracted from auto_reply_interval",
     )
     max_retries: int = Field(gt=0)
 
