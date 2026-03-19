@@ -33,9 +33,9 @@ class Note(BaseModel):
     renoteId: Optional[str] = None
     reply: Optional["Note"] = None
     renote: Optional["Note"] = None
-    visibility: Literal["public", "home", "followers", "specified"]
+    visibility: Optional[Literal["public", "home", "followers", "specified"]] = None
     mentions: Optional[List[str]] = None
-    files: Optional[List[MiFile]]
+    files: Optional[List[MiFile]] = None
 
     # Allow additional fields with unknown types
     class Config:
@@ -45,16 +45,25 @@ class Note(BaseModel):
 class MiChannelConnectParams(BaseModel):
     withRenotes: bool = True
 
+    class Config:
+        extra = "allow"
+
 
 class MiChannelConnectBody(BaseModel):
     channel: str
     id: str
     params: Optional[MiChannelConnectParams] = None
 
+    class Config:
+        extra = "allow"
+
 
 class MiChannelConnect(BaseModel):
     type: Literal["connect"] = "connect"
     body: MiChannelConnectBody
+
+    class Config:
+        extra = "allow"
 
 
 class MiWebsocketMessageBody(BaseModel):
@@ -63,10 +72,16 @@ class MiWebsocketMessageBody(BaseModel):
     channel: Optional[str] = None
     id: Optional[str] = None
 
+    class Config:
+        extra = "allow"
+
 
 class MiWebsocketMessage(BaseModel):
     type: str
     body: Optional[MiWebsocketMessageBody] = None
+
+    class Config:
+        extra = "allow"
 
 
 class Config(BaseModel):

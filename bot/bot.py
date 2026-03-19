@@ -234,7 +234,9 @@ class Bot:
         async for websocket in connect(f"{self.ws_url}/streaming?i={self.api_key}"):
             try:
                 await websocket.send(
-                    MiChannelConnect(body=MiChannelConnectBody(channel="main", id="1")).model_dump_json()
+                    MiChannelConnect(body=MiChannelConnectBody(channel="main", id="1")).model_dump_json(
+                        exclude_none=True
+                    )
                 )
                 if self._config.auto_reply_enabled:
                     await websocket.send(
