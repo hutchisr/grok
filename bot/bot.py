@@ -48,20 +48,21 @@ class Bot:
         self._next_auto_reply_delay: float = self._compute_auto_reply_delay()
 
     async def on_mention(self, note: Note):
+        logfire.info("Received mention", note=note)
         if note.user.id == self.user_id:
             logfire.debug("Ignoring own mention")
             return
         if not note.text:
-            logfire.debug(f"Empty note? {note}")
+            logfire.info("Empty note?")
             return
-        with logfire.span("Fetch context", note_id=note.id, username=note.user.username):
-            logfire.info(f"Received note: {note.id} `{note.user.username}: {note.text.replace('\n', '⏎')[:100]}`")
+        with logfire.span("Fetch context"):
             context: Optional[list[Note]] = []
             if note.replyId:
                 reply_id = note.replyId
                 for _ in range(self._config.max_context):
                     try:
                         reply = await self.get_note(reply_id)
+                        logfire.info("Fetched reply in thread", note=reply)
                     except httpx.HTTPError:
                         logfire.exception("Error fetching context")
                         break
@@ -79,7 +80,7 @@ class Bot:
         if result.strip() == "NO_REPLY":
             logfire.info(f"Skipping reply to note {note.id} (NO_REPLY)")
             return
-        with logfire.span("Send reply", note_id=note.id):
+        with logfire.span("Send reply", note=note):
             await self.send_note(result, in_reply_to=note)
 
     async def send_note(
@@ -180,6 +181,9 @@ class Bot:
 
     async def on_auto_reply(self, note: Note):
         """Automatically reply to a timeline note if enough time has passed."""
+        if not note.text and not note.files:
+            return
+
         now = time.monotonic()
         elapsed = now - self._last_auto_reply_time
         if elapsed < self._next_auto_reply_delay:
