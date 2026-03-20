@@ -44,7 +44,7 @@ class Bot:
         self._redis = redis_client
         self._agent = ChatAgent(config, redis_client=redis_client)
         self._shutdown_event = asyncio.Event()
-        self._last_auto_reply_time: float = 0.0
+        self._last_auto_reply_time: float = time.monotonic()
         self._next_auto_reply_delay: float = self._compute_auto_reply_delay()
 
     async def on_mention(self, note: Note):
