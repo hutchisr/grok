@@ -232,7 +232,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
             username = _normalize_username(username)
             with logfire.span("get social credit", username=username):
                 try:
-                    score = await _redis.get(f"score:{username}")
+                    score = await _redis.get(f"score:{username}")  # type: ignore[misc]
                     if score is None:
                         return f"User @{username} has no social credit score yet (defaults to 0)."
                     return f"User @{username} has {score} social credit points."
@@ -268,7 +268,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                         return "Error: reason is required for social credit adjustments."
 
                     # Increment score
-                    new_score = await _redis.incrby(f"score:{username}", amount)
+                    new_score = await _redis.incrby(f"score:{username}", amount)  # type: ignore[misc]
 
                     # Log change to history
                     history_entry = json.dumps(
@@ -278,10 +278,12 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                             "timestamp": datetime.now().isoformat(),
                         }
                     )
-                    await _redis.lpush(f"history:{username}", history_entry)  # type: ignore[arg-type]
+                    history_key = f"history:{username}"
+                    await _redis.lpush(history_key, history_entry)  # type: ignore[misc]
+                    await _redis.expire(history_key, 30 * 86400)  # type: ignore[misc]  # 30-day TTL
 
                     # Update leaderboard (sorted set)
-                    await _redis.zadd("global:leaderboard", {username: float(new_score)})
+                    await _redis.zadd("global:leaderboard", {username: float(new_score)})  # type: ignore[misc]
 
                     sign = "+" if amount >= 0 else ""
                     return f"Adjusted @{username}'s social credit by {sign}{amount}. New score: {new_score}. Reason: {reason}"
@@ -306,7 +308,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     limit = max(1, min(50, limit))  # Clamp to 1-50
 
                     # Get recent history entries
-                    entries = await _redis.lrange(f"history:{username}", 0, limit - 1)  # type: ignore[arg-type]
+                    entries = await _redis.lrange(f"history:{username}", 0, limit - 1)  # type: ignore[misc]
 
                     if not entries:
                         return f"No social credit history found for @{username}."
@@ -336,7 +338,7 @@ def build_tools(config: Config, redis_client: Optional[Redis] = None) -> list[Ca
                     limit = max(1, min(50, limit))
 
                     # Get top scores (descending order)
-                    top_users = await _redis.zrevrange(
+                    top_users = await _redis.zrevrange(  # type: ignore[misc]
                         "global:leaderboard",
                         0,
                         limit - 1,
