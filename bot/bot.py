@@ -25,6 +25,9 @@ from .models import (
 from .api import api_client
 
 
+_REDIS_AUTO_REPLY_KEY = "global:last_auto_reply_time"
+
+
 class Bot:
     def __init__(
         self,
@@ -44,7 +47,7 @@ class Bot:
         self._redis = redis_client
         self._agent = ChatAgent(config, redis_client=redis_client)
         self._shutdown_event = asyncio.Event()
-        self._last_auto_reply_time: float = time.monotonic()
+        self._last_auto_reply_time: float = time.time()
         self._next_auto_reply_delay: float = self._compute_auto_reply_delay()
 
     async def on_mention(self, note: Note):
@@ -62,7 +65,6 @@ class Bot:
                 for _ in range(self._config.max_context):
                     try:
                         reply = await self.get_note(reply_id)
-                        logfire.info("Fetched reply in thread", note=reply)
                     except httpx.HTTPError:
                         logfire.exception("Error fetching context")
                         break
@@ -164,15 +166,24 @@ class Bot:
         response.raise_for_status()
         note = response.json()
         note = Note(**note)
-        text_preview = note.text.replace("\n", "⏎")[:100] if note.text else ""
-        logfire.info(
-            "Fetched note",
-            note_id=note.id,
-            username=note.user.username if note.user else "unknown",
-            file_count=len(note.files) if note.files else 0,
-            text_preview=text_preview,
-        )
+        logfire.info("Fetched note", note=note)
         return note
+
+    async def _load_last_auto_reply_time(self):
+        """Load last auto reply time from Redis."""
+        assert self._redis
+        val = await self._redis.get(_REDIS_AUTO_REPLY_KEY)
+        if val is not None:
+            self._last_auto_reply_time = float(val)
+            logfire.info("Loaded last auto reply time from Redis", t=self._last_auto_reply_time)
+        else:
+            await self._save_last_auto_reply_time()
+            logfire.info("Initialized last auto reply time in Redis", t=self._last_auto_reply_time)
+
+    async def _save_last_auto_reply_time(self):
+        """Save last auto reply time to Redis."""
+        assert self._redis
+        await self._redis.set(_REDIS_AUTO_REPLY_KEY, str(self._last_auto_reply_time))
 
     def _compute_auto_reply_delay(self) -> float:
         interval = self._config.auto_reply_interval
@@ -184,13 +195,15 @@ class Bot:
         if not note.text and not note.files:
             return
 
-        now = time.monotonic()
+        now = time.time()
         elapsed = now - self._last_auto_reply_time
         if elapsed < self._next_auto_reply_delay:
             return
 
         self._last_auto_reply_time = now
         self._next_auto_reply_delay = self._compute_auto_reply_delay()
+        if self._redis:
+            await self._save_last_auto_reply_time()
 
         logfire.info("Auto-reply triggered", note=note)
         await self.on_mention(note)
@@ -231,6 +244,9 @@ class Bot:
                 logfire.exception("Error during autonomous post")
 
     async def run(self):
+        if self._redis:
+            await self._load_last_auto_reply_time()
+
         auto_post_task: Optional[asyncio.Task] = None
         if self._config.auto_post_interval:
             auto_post_task = asyncio.create_task(self._auto_post_loop())
